@@ -50,17 +50,10 @@ in the live ISO:
 └── fluffsetup.desktop
 ```
 
-For an archiso profile whose `airootfs` directory is in
-`/home/shy/flufflinux`, stage the binary with:
-
-```bash
-sudo install -Dm755 target/release/fluffsetup \
-  /home/shy/flufflinux/airootfs/usr/lib/fluffinstall/fluffsetup/fluffsetup
-```
 
 During installation, FluffInstall copies that binary into the installed system
 as `/usr/bin/fluffsetup` with mode `0755`. The `fluffsetup-session` launcher
-should execute `/usr/bin/fluffsetup`; FluffSetup then opens its CLI in Konsole.
+should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
 
 ## Current behavior
 
