@@ -1,1 +1,7 @@
-sed: fluffsetup/Cargo.toml: No such file or directory
+[package]
+name = "fluffsetup"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
