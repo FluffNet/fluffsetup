@@ -908,17 +908,6 @@ fn configure_permanent_user(username: &str, password: &str) {
     let dolphinrc = format!("/home/{username}/.config/dolphinrc");
     let home_url = format!("s|^HomeUrl=/home/|HomeUrl=/home/{username}/|");
     run_sudo("/usr/bin/sed", &["-i", &home_url, &dolphinrc]);
-    run_sudo(
-        "/usr/bin/sed",
-        &[
-            "-i",
-            "-e",
-            "/^RememberOpenedTabs=/d",
-            "-e",
-            "/^HomeUrl=/a RememberOpenedTabs=false",
-            &dolphinrc,
-        ],
-    );
     let trash_entry = format!("/home/{username}/Desktop/trash:⁄.desktop");
     run_sudo("/usr/bin/chown", &["root:root", &trash_entry]);
     let chpasswd_input = format!("{username}:{password}\n");
