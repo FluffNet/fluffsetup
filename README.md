@@ -98,8 +98,7 @@ should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
   and `libvirt`
 - grants `libvirt-qemu` access to the permanent user's home directory and gives
   the Flatpak version of Virtual Machine Manager access to home directories
-- points Dolphin's home location at the permanent user's home directory and
-  disables restoration of previously opened tabs
+- points Dolphin's home location at the permanent user's home directory
 - makes the permanent user's Trash desktop entry root-owned so KDE treats it as
   protected from ordinary removal
 - sets the permanent user's password
