@@ -6,17 +6,19 @@ import org.flufflinux.setup
 
 ApplicationWindow {
     id: window
-    readonly property bool compactScreen: Screen.width <= 1280 || Screen.height <= 720
+    // The native session layer assigns the primary output before showing this
+    // window. All sizing stays bound to that assigned output, so changing the
+    // screen later also recalculates and centers the setup window correctly.
+    readonly property bool compactScreen: screen.width <= 1280 || screen.height <= 720
     readonly property int targetWidth: compactScreen
-                                       ? Screen.width
-                                       : Math.round(Screen.width * 0.90)
+                                       ? screen.width
+                                       : Math.round(screen.width * 0.90)
     readonly property int targetHeight: compactScreen
-                                        ? Screen.height
-                                        : Math.round(Screen.height * 0.88)
-    readonly property real uiScale: Math.max(0.90,
-                                             Math.min(1.25,
-                                                      Math.min(width / 960,
-                                                               height / 640)))
+                                        ? screen.height
+                                        : Math.round(screen.height * 0.88)
+    readonly property real uiScale: Math.min(1.25,
+                                             Math.min(width / 960,
+                                                      height / 640))
     readonly property int pageHorizontalMargin: Math.round(62 * uiScale)
     readonly property int pageTopMargin: Math.round(68 * uiScale)
     readonly property int pageBottomMargin: Math.round(48 * uiScale)
@@ -27,13 +29,13 @@ ApplicationWindow {
     maximumWidth: targetWidth
     minimumHeight: targetHeight
     maximumHeight: targetHeight
-    visible: true
+    visible: false
     title: "Fluff Linux Setup"
     color: "transparent"
     modality: Qt.ApplicationModal
     flags: Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-    x: Screen.virtualX + Math.round((Screen.width - width) / 2)
-    y: Screen.virtualY + Math.round((Screen.height - height) / 2)
+    x: screen.virtualX + Math.round((screen.width - width) / 2)
+    y: screen.virtualY + Math.round((screen.height - height) / 2)
 
     readonly property color accent: "#820101"
     readonly property color headingColor: "#111111"
