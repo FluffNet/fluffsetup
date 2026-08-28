@@ -80,6 +80,10 @@ should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
   keyboard tab navigation plus Enter-to-continue on valid text-entry pages;
   tab-focused buttons receive a black outline without showing that outline for
   normal mouse or programmatic focus
+- sizes and centers the setup window from its assigned output, including on
+  mixed-resolution multi-monitor systems, and rebinds it to the matching
+  background whenever its output changes; the complete branded layout scales
+  as one unit on narrow portrait and low-resolution outputs
 - keeps the setup window application-modal so clicking its temporary
   background cannot move interaction away from setup
 - atomically saves the current page, system name, display name, and reserved
