@@ -5,8 +5,17 @@
 //! the original terminal setup as a recovery option.
 
 mod backend;
+mod clock;
+mod country;
+mod i18n;
+mod keyboard;
+mod keyboard_names;
+mod keyboard_profiles;
+mod locale;
+mod time_sync;
+mod timezone;
 
-use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQuickStyle, QUrl};
+use cxx_qt_lib::{QFont, QGuiApplication, QQmlApplicationEngine, QQuickStyle, QString, QUrl};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -32,44 +41,145 @@ const CLEANUP_FILES: &[&str] = &[
     "/var/lib/systemd/linger/fluffsetup",
 ];
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SetupProgress {
     pub page: i32,
     pub hostname: String,
     pub display_name: String,
     pub username: String,
     pub account_created: bool,
+    pub language: String,
+    pub keyboards: String,
+    pub keyboards_customized: bool,
+    pub region: String,
+    pub region_confirmed: bool,
+    pub timezone: String,
+    pub timezone_customized: bool,
+}
+
+impl Default for SetupProgress {
+    fn default() -> Self {
+        Self {
+            page: 0,
+            hostname: String::new(),
+            display_name: String::new(),
+            username: String::new(),
+            account_created: false,
+            language: "en".into(),
+            keyboards: String::new(),
+            keyboards_customized: false,
+            region: String::new(),
+            region_confirmed: false,
+            timezone: String::new(),
+            timezone_customized: false,
+        }
+    }
+}
+
+impl SetupProgress {
+    pub(crate) fn resume_page(&self) -> i32 {
+        if matches!(self.page, 2 | 3 | 4 | 5 | 7 | 9)
+            && (!self.region_confirmed || !country::valid(&self.region))
+        {
+            return 8;
+        }
+        // A saved page number cannot certify successful finalization. Only
+        // this process's completion result may unlock the Finish action.
+        if self.page == 5 {
+            return if timezone::valid(&self.timezone) {
+                3
+            } else {
+                9
+            };
+        }
+        self.page
+    }
 }
 
 fn serialize_setup_progress(progress: &SetupProgress) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\nv6\n{}\n{}\n{}\n{}\n{}\n{}",
         progress.page,
         progress.hostname,
         progress.display_name,
         progress.username,
-        progress.account_created
+        progress.account_created,
+        progress.language,
+        progress.keyboards,
+        progress.keyboards_customized,
+        progress.region,
+        progress.region_confirmed,
+        progress.timezone,
+        progress.timezone_customized
     )
 }
 
 fn parse_setup_progress(contents: &str) -> SetupProgress {
     let mut values = contents.lines();
-    let page = values
-        .next()
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|page| matches!(page, 0 | 1 | 2 | 4))
-        .unwrap_or_default();
+    let stored_page = values.next().and_then(|value| value.parse::<i32>().ok());
     let hostname = values.next().unwrap_or_default().to_string();
     let display_name = values.next().unwrap_or_default().to_string();
     let username = values.next().unwrap_or_default().to_string();
     let account_created = values.next() == Some("true");
+    let stored_language = values.next();
+    let language = stored_language
+        .and_then(i18n::normalize)
+        .unwrap_or("en")
+        .to_string();
+    let version = values.next();
+    let page = match (stored_page, version, stored_language) {
+        (Some(page @ (0 | 1 | 2 | 3 | 5)), Some("v2" | "v3" | "v4" | "v5" | "v6"), _) => page,
+        (Some(6), Some("v3" | "v4" | "v5" | "v6"), _) => 6,
+        (Some(7), Some("v4" | "v5" | "v6"), _) => 7,
+        (Some(8), Some("v5" | "v6"), _) => 8,
+        (Some(9), Some("v6"), _) => 9,
+        (Some(page @ (0 | 1 | 2 | 4)), None, None) => page + 1,
+        _ => 0,
+    };
 
+    let stored_keyboards = values.next().unwrap_or_default();
+    let keyboards = if matches!(version, Some("v4" | "v5" | "v6"))
+        && keyboard::parse_selection(stored_keyboards).is_some()
+    {
+        stored_keyboards.to_string()
+    } else {
+        String::new()
+    };
+    let stored_customized = values.next() == Some("true");
+    let keyboards_customized = !keyboards.is_empty() && stored_customized;
+    let stored_region = values.next().unwrap_or_default();
+    let region = if matches!(version, Some("v5" | "v6")) && country::valid(stored_region) {
+        stored_region.into()
+    } else {
+        String::new()
+    };
+    let stored_confirmed = values.next() == Some("true");
+    let region_confirmed = !region.is_empty() && stored_confirmed;
+    let stored_timezone = values.next().unwrap_or_default();
+    let timezone = if version == Some("v6") && timezone::valid(stored_timezone) {
+        stored_timezone.into()
+    } else {
+        String::new()
+    };
+    let timezone_customized = values.next() == Some("true") && !timezone.is_empty();
+    let page = if page == 3 && timezone.is_empty() {
+        9
+    } else {
+        page
+    };
     SetupProgress {
         page,
         hostname,
         display_name,
         username,
         account_created,
+        language,
+        keyboards,
+        keyboards_customized,
+        region,
+        region_confirmed,
+        timezone,
+        timezone_customized,
     }
 }
 
@@ -103,7 +213,7 @@ pub(crate) fn save_setup_progress(progress: &SetupProgress) -> io::Result<()> {
     // file. A power loss can therefore leave either the old or new state, but
     // never a partially written recovery record.
     let temporary_path = Path::new(SETUP_STATE_TEMP_FILE);
-    let mut file = File::create(&temporary_path)?;
+    let mut file = File::create(temporary_path)?;
     file.write_all(serialize_setup_progress(&progress).as_bytes())?;
     file.sync_all()?;
     fs::rename(temporary_path, path)?;
@@ -394,23 +504,37 @@ fn effective_display_name(display_name: &str) -> &str {
     }
 }
 
-fn validate_hostname(hostname: &str) -> Result<(), String> {
+#[derive(Debug, PartialEq)]
+enum HostnameIssue {
+    Blank,
+    TooLong,
+    Whitespace,
+    InvalidCharacters(String),
+    StartDash,
+    StartDot,
+    EndDash,
+    EndDot,
+}
+
+fn hostname_issues(hostname: &str) -> Vec<HostnameIssue> {
     if hostname.is_empty() {
-        return Err("The system name cannot be blank".to_string());
+        return vec![HostnameIssue::Blank];
     }
-
-    if hostname.len() > 255 {
-        return Err("The system name is too long. Use no more than 255 characters.".to_string());
+    let mut issues = Vec::new();
+    if hostname.chars().count() > 255 {
+        issues.push(HostnameIssue::TooLong);
     }
-
     if hostname.chars().any(char::is_whitespace) {
-        return Err("Spaces and other whitespace are not allowed in the system name.".to_string());
+        issues.push(HostnameIssue::Whitespace);
     }
-
+    // Whitespace has its own error. Do not report it again as an invalid symbol.
     let invalid_characters = hostname
         .chars()
         .filter(|character| {
-            !character.is_ascii_alphanumeric() && *character != '-' && *character != '.'
+            !character.is_whitespace()
+                && !character.is_ascii_alphanumeric()
+                && *character != '-'
+                && *character != '.'
         })
         .fold(String::new(), |mut invalid, character| {
             if !invalid.contains(character) {
@@ -420,39 +544,65 @@ fn validate_hostname(hostname: &str) -> Result<(), String> {
         });
 
     if !invalid_characters.is_empty() {
-        return Err(format!(
-            "The character{} '{}' {} not allowed. Use English letters, numbers, dashes (-), and dots (.) only.",
-            if invalid_characters.chars().count() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            invalid_characters,
-            if invalid_characters.chars().count() == 1 {
-                "is"
-            } else {
-                "are"
-            }
-        ));
+        issues.push(HostnameIssue::InvalidCharacters(invalid_characters));
     }
 
     if hostname.starts_with('-') {
-        return Err("The system name cannot start with a dash (-).".to_string());
+        issues.push(HostnameIssue::StartDash);
     }
 
     if hostname.starts_with('.') {
-        return Err("The system name cannot start with a dot (.).".to_string());
+        issues.push(HostnameIssue::StartDot);
     }
 
     if hostname.ends_with('-') {
-        return Err("The system name cannot end with a dash (-).".to_string());
+        issues.push(HostnameIssue::EndDash);
     }
 
     if hostname.ends_with('.') {
-        return Err("The system name cannot end with a dot (.).".to_string());
+        issues.push(HostnameIssue::EndDot);
     }
+    issues
+}
 
-    Ok(())
+fn hostname_validation_message(hostname: &str, language: &str) -> String {
+    hostname_issues(hostname)
+        .into_iter()
+        .map(|issue| {
+            let key = match &issue {
+                HostnameIssue::Blank => "hostnameBlank",
+                HostnameIssue::TooLong => "hostnameLong",
+                HostnameIssue::Whitespace => "hostnameWhitespace",
+                HostnameIssue::InvalidCharacters(_) => "hostnameCharacters",
+                HostnameIssue::StartDash => "hostnameStartDash",
+                HostnameIssue::StartDot => "hostnameStartDot",
+                HostnameIssue::EndDash => "hostnameEndDash",
+                HostnameIssue::EndDot => "hostnameEndDot",
+            };
+            let text = i18n::translate_for(language, key);
+            if let HostnameIssue::InvalidCharacters(characters) = issue {
+                // Isolate user-entered symbols from surrounding RTL punctuation.
+                let characters = if i18n::rtl(language) {
+                    format!("\u{2068}{characters}\u{2069}")
+                } else {
+                    characters
+                };
+                text.replace("{characters}", &characters)
+            } else {
+                text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn validate_hostname(hostname: &str) -> Result<(), String> {
+    let message = hostname_validation_message(hostname, "en");
+    if message.is_empty() {
+        Ok(())
+    } else {
+        Err(message)
+    }
 }
 
 fn validate_username(username: &str) -> Result<(), &'static str> {
@@ -603,12 +753,21 @@ fn fallback_transliteration(value: &str) -> String {
 }
 
 fn transliterate_word(word: &str) -> String {
+    transliterate_word_with(word, transliterate_with_icu)
+}
+
+fn transliterate_word_with(word: &str, convert: impl FnOnce(&str) -> Option<String>) -> String {
     // ICU follows general language transliteration rules. These common Hebrew
     // names use the spellings FluffSetup presents to its users.
     match word {
         "יעקוב" | "יעקב" => "yakov".to_string(),
         "כהן" => "cohen".to_string(),
-        _ => transliterate_with_icu(word).unwrap_or_else(|| fallback_transliteration(word)),
+        _ => {
+            // ICU's Latin-ASCII step folds shin to "s". Preserve the intended
+            // "sh" spelling before ICU runs, also when mixed with other scripts.
+            let word = word.replace('ש', "sh");
+            convert(&word).unwrap_or_else(|| fallback_transliteration(&word))
+        }
     }
 }
 
@@ -920,7 +1079,29 @@ fn apply_settings(hostname: &str, display_name: &str, username: &str, password: 
     configure_permanent_user(username, password);
 }
 
-fn apply_gui_settings(hostname: &str, display_name: &str, username: &str, password: &str) {
+#[derive(Clone, Copy)]
+struct SetupRequest<'a> {
+    hostname: &'a str,
+    display_name: &'a str,
+    username: &'a str,
+    password: &'a str,
+    language: &'a str,
+    region: &'a str,
+    keyboards: &'a str,
+    timezone: &'a str,
+}
+
+fn apply_gui_settings(request: SetupRequest<'_>) {
+    let SetupRequest {
+        hostname,
+        display_name,
+        username,
+        password,
+        language,
+        region,
+        keyboards,
+        timezone,
+    } = request;
     run_sudo("/usr/bin/hostnamectl", &["set-hostname", hostname]);
 
     if user_exists(username) {
@@ -935,23 +1116,64 @@ fn apply_gui_settings(hostname: &str, display_name: &str, username: &str, passwo
 
     // Record creation immediately after useradd. If power is lost before this
     // write, the saved reservation still identifies the same account.
+    let previous = load_setup_progress();
     save_setup_progress(&SetupProgress {
-        page: 2,
+        page: 3,
         hostname: hostname.to_string(),
         display_name: display_name.to_string(),
         username: username.to_string(),
         account_created: true,
+        language: language.to_string(),
+        keyboards: keyboards.to_string(),
+        keyboards_customized: previous.keyboards_customized,
+        region: region.to_string(),
+        region_confirmed: previous.region_confirmed,
+        timezone: timezone.to_string(),
+        timezone_customized: previous.timezone_customized,
     })
     .unwrap_or_else(|error| {
         exit_with_error(&format!("Could not record the created account: {error}"))
     });
 
     configure_permanent_user(username, password);
+    apply_selected_language(username, language, region);
+    apply_selected_keyboards(username, keyboards);
+    apply_selected_timezone(timezone);
+}
+
+fn apply_selected_timezone(timezone: &str) {
+    let executable = env::current_exe()
+        .unwrap_or_else(|error| exit_with_error(&format!("Cannot locate FluffSetup: {error}")));
+    let executable = executable
+        .to_str()
+        .unwrap_or_else(|| exit_with_error("Invalid executable path."));
+    run_sudo(executable, &["--apply-timezone", timezone]);
+}
+
+fn apply_selected_keyboards(username: &str, keyboards: &str) {
+    let executable = env::current_exe()
+        .unwrap_or_else(|error| exit_with_error(&format!("Cannot locate FluffSetup: {error}")));
+    let executable = executable
+        .to_str()
+        .unwrap_or_else(|| exit_with_error("Invalid executable path."));
+    run_sudo(executable, &["--apply-keyboard", username, keyboards]);
+}
+
+fn apply_selected_language(username: &str, language: &str, region: &str) {
+    let executable = env::current_exe()
+        .unwrap_or_else(|error| exit_with_error(&format!("Cannot locate FluffSetup: {error}")));
+    let executable = executable
+        .to_str()
+        .unwrap_or_else(|| exit_with_error("Invalid executable path."));
+    run_sudo(
+        executable,
+        &["--apply-language", username, language, region],
+    );
 }
 
 fn run_setup() {
     print!("\x1B[2J\x1B[1;1H");
-    println!("fluffsetup 1.0 - Fluff Linux Setup\n");
+    println!("fluffsetup 1.5 - Fluff Linux Setup\n");
     println!("Welcome to FluffSetup.");
     println!("This temporary setup will create your account and name your system.");
 
@@ -972,7 +1194,36 @@ fn run_setup() {
     let _ = io::stdout().flush();
     let mut input = String::new();
     let _ = io::stdin().read_line(&mut input);
+    let progress = load_setup_progress();
+    let region = if country::valid(&progress.region) {
+        progress.region.clone()
+    } else {
+        country::default_country(&progress.language)
+    };
+    apply_selected_language(&username, &progress.language, &region);
+    let keyboards =
+        if keyboard::validate_selection(&progress.keyboards, keyboard::catalog()).is_ok() {
+            progress.keyboards
+        } else {
+            keyboard::defaults(&progress.language, keyboard::catalog())
+        };
+    apply_selected_keyboards(&username, &keyboards);
+    // The terminal fallback has no timezone picker. Apply a recovered explicit
+    // choice, but do not guess or alter the existing zone without one.
+    if timezone::valid(&progress.timezone) {
+        apply_selected_timezone(&progress.timezone);
+    }
     request_cleanup();
+}
+
+pub(crate) fn setup_payload(fields: [&str; 8]) -> String {
+    fields.join("\n")
+}
+
+fn parse_setup_payload(input: &str) -> Result<[&str; 8], &'static str> {
+    let fields: Vec<_> = input.splitn(8, '\n').collect();
+    let fields: [&str; 8] = fields.try_into().map_err(|_| "Incomplete setup details.")?;
+    Ok(fields.map(|value| value.trim_end_matches('\r')))
 }
 
 fn run_gui_apply() {
@@ -980,15 +1231,18 @@ fn run_gui_apply() {
     io::stdin()
         .read_to_string(&mut input)
         .unwrap_or_else(|error| exit_with_error(&format!("Failed to read setup details: {error}")));
-    let mut values = input.splitn(4, '\n');
-    let hostname = values.next().unwrap_or_default().trim_end_matches('\r');
-    let entered_display_name = values.next().unwrap_or_default().trim_end_matches('\r');
+    let [
+        hostname,
+        entered_display_name,
+        username,
+        language,
+        region,
+        keyboards,
+        timezone,
+        password,
+    ] = parse_setup_payload(&input).unwrap_or_else(|error| exit_with_error(error));
     let display_name = effective_display_name(entered_display_name);
-    let username = values.next().unwrap_or_default().trim_end_matches('\r');
-    let password = values
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches(['\r', '\n']);
+    let password = password.trim_end_matches(['\r', '\n']);
 
     if let Err(error) = validate_hostname(hostname) {
         exit_with_error(&error);
@@ -1003,7 +1257,27 @@ fn run_gui_apply() {
     if let Err(error) = validate_username(username) {
         exit_with_error(error);
     }
-    apply_gui_settings(hostname, display_name, username, password);
+    if i18n::metadata(language).is_none() {
+        exit_with_error("Unsupported setup language.");
+    }
+    if !country::valid(region) {
+        exit_with_error("Unsupported geographic region.");
+    }
+    keyboard::validate_selection(keyboards, keyboard::catalog())
+        .unwrap_or_else(|error| exit_with_error(&error));
+    if !timezone::valid(timezone) {
+        exit_with_error("Invalid or unavailable timezone.");
+    }
+    apply_gui_settings(SetupRequest {
+        hostname,
+        display_name,
+        username,
+        password,
+        language,
+        region,
+        keyboards,
+        timezone,
+    });
 
     // The summary is shown only after every temporary setup artifact is gone.
     // The running Wayland session remains alive in memory until Finish exits
@@ -1017,31 +1291,98 @@ fn run_gui_apply() {
 }
 
 fn launch_gui() {
+    let language = if preview_mode() {
+        preview_argument("language").unwrap_or_else(|| i18n::language().to_string())
+    } else {
+        load_setup_progress().language
+    };
+    if !i18n::set_language(&language) {
+        i18n::set_language("en");
+    }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     QGuiApplication::set_desktop_file_name(&"fluffsetup".into());
     QQuickStyle::set_style(&"Fusion".into());
 
-    unsafe {
-        // SAFETY: both functions are implemented by native/session.cpp and
-        // are called on Qt's GUI thread after QGuiApplication is constructed.
-        fluffsetup_initialize_session_background();
+    if let Some(family) = preview_argument("font") {
+        let mut font = QFont::default();
+        font.set_family(&QString::from(&family));
+        if let Some(app) = app.as_mut() {
+            app.set_application_font(&font);
+        }
+    }
+
+    if !preview_mode() {
+        unsafe {
+            // SAFETY: both functions are implemented by native/session.cpp and
+            // are called on Qt's GUI thread after QGuiApplication is constructed.
+            fluffsetup_initialize_session_background();
+        }
     }
     if let Some(engine) = engine.as_mut() {
         engine.load(&QUrl::from("qrc:/qt/qml/org/flufflinux/setup/qml/Main.qml"));
     }
-    unsafe {
-        // SAFETY: the QML engine has created the setup window, and the native
-        // helper only inspects and binds Qt top level windows on this thread.
-        fluffsetup_bind_setup_window();
+    if !preview_mode() {
+        unsafe {
+            // SAFETY: the QML engine has created the setup window, and the native
+            // helper only inspects and binds Qt top level windows on this thread.
+            fluffsetup_bind_setup_window();
+        }
     }
     if let Some(app) = app.as_mut() {
         app.exec();
     }
 }
 
+fn preview_mode() -> bool {
+    env::args().any(|argument| argument == "--preview")
+}
+
+fn preview_argument(name: &str) -> Option<String> {
+    if !preview_mode() {
+        return None;
+    }
+    let prefix = format!("--{name}=");
+    env::args().find_map(|argument| argument.strip_prefix(&prefix).map(str::to_owned))
+}
+
 fn main() {
-    if env::args().any(|argument| argument == "--cleanup") {
+    if preview_mode() {
+        launch_gui();
+    } else if env::args().any(|argument| argument == "--apply-keyboard") {
+        let arguments: Vec<_> = env::args().collect();
+        if arguments.len() != 4 || arguments[1] != "--apply-keyboard" {
+            exit_with_error("Invalid keyboard helper arguments.");
+        }
+        keyboard::apply_for_user(&arguments[2], &arguments[3])
+            .unwrap_or_else(|error| exit_with_error(&error));
+    } else if env::args().any(|argument| argument == "--apply-user-keyboard") {
+        let arguments: Vec<_> = env::args().collect();
+        if arguments.len() != 3 || arguments[1] != "--apply-user-keyboard" {
+            exit_with_error("Invalid user keyboard helper arguments.");
+        }
+        keyboard::apply_user(&arguments[2]).unwrap_or_else(|error| exit_with_error(&error));
+    } else if env::args().any(|argument| argument == "--apply-timezone") {
+        let arguments: Vec<_> = env::args().collect();
+        if arguments.len() != 3 || arguments[1] != "--apply-timezone" {
+            exit_with_error("Invalid timezone helper arguments.");
+        }
+        timezone::apply(&arguments[2]).unwrap_or_else(|error| exit_with_error(&error));
+    } else if env::args().any(|argument| argument == "--apply-language") {
+        let arguments: Vec<_> = env::args().collect();
+        if arguments.len() != 5 || arguments[1] != "--apply-language" {
+            exit_with_error("Invalid language helper arguments.");
+        }
+        locale::apply_system_and_user(&arguments[2], &arguments[3], &arguments[4])
+            .unwrap_or_else(|error| exit_with_error(&error));
+    } else if env::args().any(|argument| argument == "--apply-user-language") {
+        let arguments: Vec<_> = env::args().collect();
+        if arguments.len() != 4 || arguments[1] != "--apply-user-language" {
+            exit_with_error("Invalid user language helper arguments.");
+        }
+        locale::apply_user(&arguments[2], &arguments[3])
+            .unwrap_or_else(|error| exit_with_error(&error));
+    } else if env::args().any(|argument| argument == "--cleanup") {
         run_cleanup();
     } else if env::args().any(|argument| argument == "--prepare-summary") {
         run_prepare_summary();
@@ -1059,11 +1400,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLEANUP_FILES, SETUP_STATE_FILE, SETUP_STATE_TEMP_FILE, SetupProgress,
-        account_matches_setup_identity_in, parse_setup_progress, serialize_setup_progress,
-        setup_progress_with_defaults, unique_username_from_base, username_base_from_display_name,
-        validate_display_name, validate_hostname, validate_username, without_autologin_section,
+        CLEANUP_FILES, HostnameIssue, SETUP_STATE_FILE, SETUP_STATE_TEMP_FILE, SetupProgress,
+        account_matches_setup_identity_in, fallback_transliteration, hostname_issues,
+        hostname_validation_message, i18n, parse_setup_progress, serialize_setup_progress,
+        setup_progress_with_defaults, transliterate_word_with, unique_username_from_base,
+        username_base_from_display_name, validate_display_name, validate_hostname,
+        validate_username, without_autologin_section,
     };
+
+    #[test]
+    fn recovery_requires_a_confirmed_region_and_never_unlocks_finish() {
+        let mut progress = SetupProgress {
+            language: "en".into(),
+            region: "IL".into(),
+            region_confirmed: true,
+            timezone: "Asia/Jerusalem".into(),
+            ..SetupProgress::default()
+        };
+        for page in [2, 3, 4, 5, 7, 9] {
+            progress.page = page;
+            assert_eq!(progress.resume_page(), if page == 5 { 3 } else { page });
+            progress.region_confirmed = false;
+            assert_eq!(progress.resume_page(), 8);
+            progress.region_confirmed = true;
+            progress.region = "XX".into();
+            assert_eq!(progress.resume_page(), 8);
+            progress.region = "IL".into();
+        }
+        progress.page = 5;
+        progress.timezone.clear();
+        assert_eq!(progress.resume_page(), 9);
+        for page in [0, 1, 6, 8] {
+            progress.page = page;
+            assert_eq!(progress.resume_page(), page);
+        }
+    }
 
     #[test]
     fn validates_hostnames() {
@@ -1083,16 +1454,72 @@ mod tests {
         );
         assert_eq!(
             validate_hostname("bad@name!").unwrap_err(),
-            "The characters '@!' are not allowed. Use English letters, numbers, dashes (-), and dots (.) only."
+            "The following characters are not allowed in the system name: '@!'."
         );
         assert_eq!(
             validate_hostname("שלום").unwrap_err(),
-            "The characters 'שלום' are not allowed. Use English letters, numbers, dashes (-), and dots (.) only."
+            "The following characters are not allowed in the system name: 'שלום'."
         );
         assert_eq!(
             validate_hostname(&"a".repeat(256)).unwrap_err(),
             "The system name is too long. Use no more than 255 characters."
         );
+    }
+
+    #[test]
+    fn hostname_errors_are_specific_and_combined() {
+        assert_eq!(
+            hostname_issues("my laptop"),
+            vec![HostnameIssue::Whitespace]
+        );
+        assert_eq!(
+            hostname_issues("my\tlaptop\n"),
+            vec![HostnameIssue::Whitespace]
+        );
+        assert_eq!(
+            hostname_issues("fluff@@pc"),
+            vec![HostnameIssue::InvalidCharacters("@".into())]
+        );
+        assert_eq!(
+            hostname_issues("-my laptop@."),
+            vec![
+                HostnameIssue::Whitespace,
+                HostnameIssue::InvalidCharacters("@".into()),
+                HostnameIssue::StartDash,
+                HostnameIssue::EndDot,
+            ]
+        );
+        assert_eq!(hostname_issues(""), vec![HostnameIssue::Blank]);
+        assert_eq!(
+            hostname_issues(".pc-"),
+            vec![HostnameIssue::StartDot, HostnameIssue::EndDash]
+        );
+        assert_eq!(
+            hostname_issues(&format!("-{} @.", "a".repeat(256))).len(),
+            5
+        );
+        assert!(hostname_issues("fluff-pc.example").is_empty());
+        assert_eq!(
+            hostname_issues(&"א".repeat(100)),
+            vec![HostnameIssue::InvalidCharacters("א".into())]
+        );
+        assert_eq!(
+            hostname_validation_message("my laptop", "he"),
+            "אין להשתמש ברווחים או בתווי רווח אחרים בשם המערכת."
+        );
+        for language in i18n::LANGUAGES {
+            let message = hostname_validation_message("-my laptop@.", language);
+            assert_eq!(message.lines().count(), 4, "{language}");
+            assert!(!message.contains("{characters}"), "{language}");
+            assert!(!message.contains("hostname"), "{language}");
+        }
+        assert_eq!(
+            hostname_validation_message("my laptop", "en")
+                .lines()
+                .count(),
+            1
+        );
+        assert!(hostname_validation_message("fluff@pc", "he").contains("\u{2068}@\u{2069}"));
     }
 
     #[test]
@@ -1126,8 +1553,29 @@ mod tests {
             ("John Michael Smith", "johnms"),
             ("יעקוב", "yakov"),
             ("יעקוב כהן", "yakovc"),
+            ("שי", "shy"),
+            ("שי כהן", "shyc"),
         ] {
             assert_eq!(username_base_from_display_name(display_name), expected);
+        }
+    }
+
+    #[test]
+    fn preserves_hebrew_shin_with_or_without_icu() {
+        for (word, prepared, expected) in [
+            ("שי", "shי", "shy"),
+            ("ש", "sh", "sh"),
+            ("שש", "shsh", "shsh"),
+            ("aשb", "ashb", "ashb"),
+        ] {
+            let converted = transliterate_word_with(word, |input| {
+                assert_eq!(input, prepared);
+                // Model ICU's existing shin-to-s behavior so this regression
+                // also detects a failure when ICU is absent on the test host.
+                Some(fallback_transliteration(&input.replace('ש', "s")))
+            });
+            assert_eq!(converted, expected);
+            assert_eq!(transliterate_word_with(word, |_| None), expected);
         }
     }
 
@@ -1165,17 +1613,69 @@ mod tests {
     #[test]
     fn recovery_state_round_trips_without_a_password() {
         let progress = SetupProgress {
-            page: 2,
+            page: 3,
             hostname: "FL-IW2098".to_string(),
             display_name: "Shai Zedaka".to_string(),
             username: "shaiz".to_string(),
             account_created: false,
+            language: "he".into(),
+            keyboards: "us,il".into(),
+            keyboards_customized: true,
+            region: "IL".into(),
+            region_confirmed: true,
+            timezone: "Asia/Jerusalem".into(),
+            timezone_customized: true,
         };
         let serialized = serialize_setup_progress(&progress);
 
-        assert_eq!(serialized, "2\nFL-IW2098\nShai Zedaka\nshaiz\nfalse");
+        assert_eq!(
+            serialized,
+            "3\nFL-IW2098\nShai Zedaka\nshaiz\nfalse\nhe\nv6\nus,il\ntrue\nIL\ntrue\nAsia/Jerusalem\ntrue"
+        );
         assert_eq!(parse_setup_progress(&serialized), progress);
         assert!(!serialized.to_ascii_lowercase().contains("password"));
+        let mut reordered = progress;
+        for selection in ["il,us", "us,fr:oss,il,de:neo", "de:neo,us,il,fr:oss"] {
+            reordered.keyboards = selection.into();
+            let restored = parse_setup_progress(&serialize_setup_progress(&reordered));
+            assert_eq!(restored, reordered);
+            assert_eq!(restored.keyboards, selection);
+            assert!(restored.keyboards_customized);
+        }
+        for language in ["en", "he", "fr", "ru", "ja", "sr_Latn", "ca_valencia"] {
+            for region in crate::country::codes() {
+                reordered.language = language.into();
+                reordered.region = region.clone();
+                assert_eq!(
+                    parse_setup_progress(&serialize_setup_progress(&reordered)),
+                    reordered
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finalization_payload_keeps_geography_language_and_keyboard_order_separate() {
+        for (language, region) in [("en", "IL"), ("he", "US"), ("fr", "BE"), ("cs", "JP")] {
+            let fields = [
+                "fluff-pc",
+                "User",
+                "user",
+                language,
+                region,
+                "il,us",
+                "Asia/Jerusalem",
+                "example-secret",
+            ];
+            let payload = super::setup_payload(fields);
+            assert_eq!(super::parse_setup_payload(&payload).unwrap(), fields);
+            let crlf = payload.replace('\n', "\r\n");
+            assert_eq!(super::parse_setup_payload(&crlf).unwrap(), fields);
+            assert!(
+                super::parse_setup_payload("fluff-pc\nUser\nuser\nen\nus,il\nexample-secret")
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1183,13 +1683,62 @@ mod tests {
         assert_eq!(
             parse_setup_progress("2\nfluff-pc\nUser"),
             SetupProgress {
-                page: 2,
+                page: 9,
                 hostname: "fluff-pc".to_string(),
                 display_name: "User".to_string(),
                 username: String::new(),
                 account_created: false,
+                language: "en".into(),
+                ..SetupProgress::default()
             }
         );
+    }
+
+    #[test]
+    fn timezone_recovery_preserves_selection_and_migrates_unfinished_accounts() {
+        let state = SetupProgress {
+            page: 9,
+            language: "he".into(),
+            region: "IL".into(),
+            region_confirmed: true,
+            timezone: "Europe/Brussels".into(),
+            ..SetupProgress::default()
+        };
+        assert_eq!(
+            parse_setup_progress(&serialize_setup_progress(&state)),
+            state
+        );
+        for id in ["", "../etc/passwd", "Asia/Unavailable"] {
+            let invalid = SetupProgress {
+                page: 3,
+                timezone: id.into(),
+                ..state.clone()
+            };
+            let recovered = parse_setup_progress(&serialize_setup_progress(&invalid));
+            assert_eq!(recovered.page, 9);
+            assert!(recovered.timezone.is_empty());
+            assert!(!recovered.timezone_customized);
+            assert_eq!(recovered.region, "IL");
+        }
+        assert_eq!(
+            parse_setup_progress("3\nfluff-pc\nUser\nuser\nfalse\nhe\nv5\nus,il\ntrue\nIL\ntrue")
+                .page,
+            9
+        );
+        let corrupt = parse_setup_progress(
+            "9\nfluff-pc\nUser\nuser\nfalse\nhe\nv6\nus;bad\ntrue\nXX\ntrue\nUTC",
+        );
+        assert_eq!(corrupt.timezone, "UTC");
+        assert!(corrupt.region.is_empty() && corrupt.keyboards.is_empty());
+        for customized in [false, true] {
+            let selection = SetupProgress {
+                timezone_customized: customized,
+                ..state.clone()
+            };
+            let restored = parse_setup_progress(&serialize_setup_progress(&selection));
+            assert_eq!(restored.timezone_customized, customized);
+            assert_eq!(restored.timezone, "Europe/Brussels");
+        }
     }
 
     #[test]
@@ -1201,6 +1750,8 @@ mod tests {
                 display_name: "   ".to_string(),
                 username: String::new(),
                 account_created: false,
+                language: "en".into(),
+                ..SetupProgress::default()
             },
             "FL-IW2098",
         );
@@ -1228,8 +1779,99 @@ mod tests {
 
     #[test]
     fn recovery_state_rejects_non_resumable_pages() {
+        let state =
+            parse_setup_progress("8\nfluff-pc\nUser\n\nfalse\nhe\nv5\nil,us\ntrue\nFR\ntrue");
+        assert_eq!(state.page, 8);
+        assert_eq!(state.language, "he");
+        assert_eq!(state.region, "FR");
+        assert!(state.region_confirmed && state.keyboards_customized);
+        for invalid in ["PS", "XX", "", "il", "IL;bad"] {
+            let state = parse_setup_progress(&format!(
+                "8\n\n\n\nfalse\nhe\nv5\nus,il\ntrue\n{invalid}\ntrue"
+            ));
+            assert!(state.region.is_empty());
+            assert!(!state.region_confirmed);
+            assert_eq!(state.keyboards, "us,il");
+        }
+        assert_eq!(
+            parse_setup_progress("8\n\n\n\nfalse\nhe\nv4\nus,il\ntrue").page,
+            0
+        );
+        assert_eq!(
+            parse_setup_progress("7\nfluff-pc\nUser\nuser\nfalse\nhe\nv4\nil,us:intl\ntrue")
+                .keyboards,
+            "il,us:intl"
+        );
+        assert!(
+            parse_setup_progress("7\nfluff-pc\nUser\nuser\nfalse\nhe\nv4\nil,us:intl\ntrue")
+                .keyboards_customized
+        );
+        for version in ["v2", "v3"] {
+            let old = parse_setup_progress(&format!("1\nfluff-pc\nUser\n\nfalse\nhe\n{version}"));
+            assert_eq!(old.page, 1);
+            assert!(old.keyboards.is_empty());
+            assert!(!old.keyboards_customized);
+        }
+        for invalid in ["us,us", "", "us;bad", "us,il,de,fr,gb"] {
+            let state = parse_setup_progress(&format!(
+                "7\nfluff-pc\nUser\n\nfalse\nhe\nv4\n{invalid}\ntrue"
+            ));
+            assert!(state.keyboards.is_empty());
+            assert!(!state.keyboards_customized);
+        }
+        assert_eq!(parse_setup_progress("").page, 0);
+        assert_eq!(parse_setup_progress("invalid\nfluff-pc\nUser").page, 0);
         assert_eq!(parse_setup_progress("3\nfluff-pc\nUser").page, 0);
         assert_eq!(parse_setup_progress("999\nfluff-pc\nUser").page, 0);
+        assert_eq!(
+            parse_setup_progress("4\nfluff-pc\nUser\nuser\ntrue\nhe\nv2").page,
+            0
+        );
+    }
+
+    #[test]
+    fn language_and_page_recover_for_every_choice_and_legacy_pages_migrate() {
+        assert_eq!(SetupProgress::default().language, "en");
+        assert_eq!(SetupProgress::default().page, 0);
+        for language in crate::i18n::LANGUAGES {
+            for page in [0, 1, 2, 3, 5, 6, 7, 8, 9] {
+                let progress = SetupProgress {
+                    page,
+                    language: language.to_string(),
+                    timezone: "UTC".into(),
+                    ..SetupProgress::default()
+                };
+                assert_eq!(
+                    parse_setup_progress(&serialize_setup_progress(&progress)),
+                    progress
+                );
+            }
+        }
+        for region in crate::i18n::regions() {
+            let progress = SetupProgress {
+                page: 6,
+                language: crate::i18n::canonical_choice(region.code).unwrap().into(),
+                ..SetupProgress::default()
+            };
+            assert_eq!(
+                parse_setup_progress(&serialize_setup_progress(&progress)),
+                progress
+            );
+        }
+        for (old, new) in [(0, 1), (1, 2), (2, 9), (4, 5)] {
+            assert_eq!(
+                parse_setup_progress(&format!("{old}\nfluff-pc\nUser\nuser\ntrue")).page,
+                new
+            );
+        }
+        assert_eq!(
+            parse_setup_progress("0\n\n\n\nfalse\nzz\nv2").language,
+            "en"
+        );
+        assert_eq!(
+            parse_setup_progress("3\nfluff-pc\nUser\nuser\ntrue\nhe\nv99").page,
+            0
+        );
     }
 
     #[test]

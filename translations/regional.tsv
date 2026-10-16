@@ -1,0 +1,12 @@
+locale	key	text
+pt_BR	accountTitle	Crie seu usuário
+pt_BR	accountBody	Digite um nome e uma senha para seu usuário.
+pt_BR	password	Senha
+pt_BR	confirm	Confirme a senha
+pt_BR	hide	Ocultar senha
+pt_BR	show	Mostrar senha
+pt_BR	mismatch	As senhas não coincidem
+pt_BR	passwordError	A senha não pode ficar em branco.
+pt_BR	welcomeBody	Obrigado por escolher o Fluff Linux. Este programa vai ajudar você a configurar o sistema e criar seu usuário.
+pt_BR	notice	Aviso: sua senha fica visível por padrão. Use o botão do olho para ocultá-la ou mostrá-la e certifique-se de que ninguém veja sua tela.
+pt_BR	readyBody	Seu usuário foi criado com sucesso. Continue para a tela de login para entrar no Fluff Linux.

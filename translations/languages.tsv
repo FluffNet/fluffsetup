@@ -1,0 +1,97 @@
+code	english	native	title	locale
+as	Assamese	অসমীয়া	ভাষা	as_IN.UTF-8
+my	Burmese	မြန်မာ	ဘာသာစကား	my_MM.UTF-8
+ha	Hausa	Hausa	Harshe	ha_NG.UTF-8
+ig	Igbo	Igbo	Asụsụ	ig_NG.UTF-8
+kn	Kannada	ಕನ್ನಡ	ಭಾಷೆ	kn_IN.UTF-8
+km	Khmer	ខ្មែរ	ភាសា	km_KH.UTF-8
+ku	Kurdish (Kurmanji)	Kurdî	Ziman	ku_TR.UTF-8
+lo	Lao	ລາວ	ພາສາ	lo_LA.UTF-8
+ml	Malayalam	മലയാളം	ഭാഷ	ml_IN.UTF-8
+or	Odia	ଓଡ଼ିଆ	ଭାଷା	or_IN.UTF-8
+om	Oromo	Afaan Oromoo	Afaan	om_ET.UTF-8
+ps	Pashto	پښتو	ژبه	ps_AF.UTF-8
+pa	Punjabi (Gurmukhi)	ਪੰਜਾਬੀ	ਭਾਸ਼ਾ	pa_IN.UTF-8
+si	Sinhala	සිංහල	භාෂාව	si_LK.UTF-8
+so	Somali	Soomaali	Luqad	so_SO.UTF-8
+xh	Xhosa	isiXhosa	Ulwimi	xh_ZA.UTF-8
+yo	Yoruba	Yorùbá	Èdè	yo_NG.UTF-8
+zu	Zulu	isiZulu	Ulimi	zu_ZA.UTF-8
+af	Afrikaans	Afrikaans	Taal	af_ZA.UTF-8
+sq	Albanian	Shqip	Gjuha	sq_AL.UTF-8
+am	Amharic	አማርኛ	ቋንቋ	am_ET.UTF-8
+hy	Armenian	Հայերեն	Լեզու	hy_AM.UTF-8
+az	Azerbaijani	Azərbaycanca	Dil	az_AZ.UTF-8
+eu	Basque	Euskara	Hizkuntza	eu_ES.UTF-8
+be	Belarusian	Беларуская	Мова	be_BY.UTF-8
+bs	Bosnian	Bosanski	Jezik	bs_BA.UTF-8
+ca	Catalan	Català	Llengua	ca_ES.UTF-8
+zh_Hans	Chinese (Simplified)	简体中文	语言	zh_CN.UTF-8
+zh_Hant	Chinese (Traditional)	繁體中文	語言	zh_TW.UTF-8
+gl	Galician	Galego	Idioma	gl_ES.UTF-8
+ka	Georgian	ქართული	ენა	ka_GE.UTF-8
+gu	Gujarati	ગુજરાતી	ભાષા	gu_IN.UTF-8
+is	Icelandic	Íslenska	Tungumál	is_IS.UTF-8
+kk	Kazakh	Қазақша	Тіл	kk_KZ.UTF-8
+mk	Macedonian	Македонски	Јазик	mk_MK.UTF-8
+mr	Marathi	मराठी	भाषा	mr_IN.UTF-8
+mn	Mongolian	Монгол	Хэл	mn_MN.UTF-8
+ne	Nepali	नेपाली	भाषा	ne_NP.UTF-8
+nn	Norwegian Nynorsk	Norsk nynorsk	Språk	nn_NO.UTF-8
+ta	Tamil	தமிழ்	மொழி	ta_IN.UTF-8
+te	Telugu	తెలుగు	భాష	te_IN.UTF-8
+uz	Uzbek	O‘zbekcha	Til	uz_UZ.UTF-8
+ar	Arabic	العربية	اللغة	ar_SA.UTF-8
+bg	Bulgarian	Български	Език	bg_BG.UTF-8
+bn	Bengali	বাংলা	ভাষা	bn_BD.UTF-8
+cs	Czech	Čeština	Jazyk	cs_CZ.UTF-8
+da	Danish	Dansk	Sprog	da_DK.UTF-8
+de	German	Deutsch	Sprache	de_DE.UTF-8
+el	Greek	Ελληνικά	Γλώσσα	el_GR.UTF-8
+en	English	English	Language	en_US.UTF-8
+es	Spanish	Español	Idioma	es_ES.UTF-8
+et	Estonian	Eesti	Keel	et_EE.UTF-8
+fa	Persian	فارسی	زبان	fa_IR.UTF-8
+fi	Finnish	Suomi	Kieli	fi_FI.UTF-8
+fil	Filipino	Filipino	Wika	fil_PH.UTF-8
+fr	French	Français	Langue	fr_FR.UTF-8
+ga	Irish	Gaeilge	Teanga	ga_IE.UTF-8
+he	Hebrew	עברית	שפה	he_IL.UTF-8
+hi	Hindi	हिन्दी	भाषा	hi_IN.UTF-8
+hr	Croatian	Hrvatski	Jezik	hr_HR.UTF-8
+hu	Hungarian	Magyar	Nyelv	hu_HU.UTF-8
+id	Indonesian	Bahasa Indonesia	Bahasa	id_ID.UTF-8
+it	Italian	Italiano	Lingua	it_IT.UTF-8
+ja	Japanese	日本語	言語	ja_JP.UTF-8
+ko	Korean	한국어	언어	ko_KR.UTF-8
+lt	Lithuanian	Lietuvių	Kalba	lt_LT.UTF-8
+lv	Latvian	Latviešu	Valoda	lv_LV.UTF-8
+ms	Malay	Bahasa Melayu	Bahasa	ms_MY.UTF-8
+mt	Maltese	Malti	Lingwa	mt_MT.UTF-8
+nb	Norwegian Bokmål	Norsk bokmål	Språk	nb_NO.UTF-8
+nl	Dutch	Nederlands	Taal	nl_NL.UTF-8
+pl	Polish	Polski	Język	pl_PL.UTF-8
+pt	Portuguese	Português	Idioma	pt_PT.UTF-8
+ro	Romanian	Română	Limbă	ro_RO.UTF-8
+ru	Russian	Русский	Язык	ru_RU.UTF-8
+sk	Slovak	Slovenčina	Jazyk	sk_SK.UTF-8
+sl	Slovenian	Slovenščina	Jezik	sl_SI.UTF-8
+sr	Serbian (Cyrillic)	Српски	Језик	sr_RS.UTF-8
+sv	Swedish	Svenska	Språk	sv_SE.UTF-8
+sw	Swahili	Kiswahili	Lugha	sw_TZ.UTF-8
+th	Thai	ไทย	ภาษา	th_TH.UTF-8
+tr	Turkish	Türkçe	Dil	tr_TR.UTF-8
+uk	Ukrainian	Українська	Мова	uk_UA.UTF-8
+ur	Urdu	اردو	زبان	ur_PK.UTF-8
+vi	Vietnamese	Tiếng Việt	Ngôn ngữ	vi_VN.UTF-8
+kok	Konkani	कोंकणी	भास	kok_IN.UTF-8
+lb	Luxembourgish	Lëtzebuergesch	Sprooch	lb_LU.UTF-8
+mi	Maori	Te reo Māori	Reo	mi_NZ.UTF-8
+quz	Quechua	Runasimi	Simi	quz_PE.UTF-8
+gd	Scottish Gaelic	Gàidhlig	Cànan	gd_GB.UTF-8
+tt	Tatar	Татарча	Тел	tt_RU.UTF-8
+ug	Uyghur	ئۇيغۇرچە	تىل	ug_CN.UTF-8
+ca_valencia	Valencian	Valencià	Llengua	ca_ES.UTF-8@valencia
+cy	Welsh	Cymraeg	Iaith	cy_GB.UTF-8
+sr_Latn	Serbian (Latin)	Srpski	Jezik	sr_RS.UTF-8@latin
+pa_Arab	Punjabi (Arabic script)	پنجابی (شاہ مکھی)	بولی	pa_PK.UTF-8
