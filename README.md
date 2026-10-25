@@ -101,7 +101,8 @@ should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
   exist, using native labels such as `Deutsch (Österreich)`; the established
   default country is first, other countries follow by name, and both Enter keys,
   arrows, and country-initial cycling work without showing English duplicates
-- uses one Kirigami wheel handler, native touch flicking, and a visible scrollbar;
+- uses one Kirigami wheel handler, native touch flicking, and a scrollbar only
+  when the list overflows (short, empty and exactly fitting lists hide it);
   the language page's Next button aligns with the rows rather than the scrollbar
 - adds a geographic Region page after Welcome, with native country names,
   language-based suggestions, and a KDE globe icon; there is no search field
@@ -157,8 +158,20 @@ should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
 - the authorized cleanup removes temporary login settings, recovery state, the
   Wayland session, launcher, passwordless sudo rule, AccountsService record,
   `fluffsetup` account and home directory, and the FluffSetup binary; pressing
-  Finish then exits the already-running temporary Wayland session so Plasma
-  Login Manager returns to its greeter
+  Finish then exits the already-running temporary Wayland session
+- arms a one-time system-managed PLM handoff only after finalization succeeds;
+  the worker survives account/binary cleanup, waits for Finish, clears remaining
+  temporary sessions and restarts the PLM daemon with the finalized system
+  language and regional formats, without a reboot or additional greeter
+- stops PLM and retires its old greeter sessions before starting the refreshed
+  daemon, waiting for the previous compositor to release its virtual terminal
+  instead of racing a second greeter onto the same screen
+- uses a runtime-only PLM service override to read `/etc/locale.conf`, keeping
+  interface language separate from regional formats and excluding `LC_ALL`;
+  the worker is automatically collected and the override disappears at reboot
+- releases the QML windows and wallpaper backing stores before Qt closes its
+  display connection, so Finish does not leave native wallpaper cleanup until
+  process shutdown
 
 The installed system provides passwordless sudo access to the temporary
 `fluffsetup` account only during first boot. FluffSetup removes that permission
@@ -226,8 +239,7 @@ The Region page uses the installed ICU ISO country list and country names in the
 selected interface language. Countries associated with the supported language
 locales appear under Suggested regions, with the selected language/dialect's
 country first. Remaining regions follow alphabetically by localized name.
-Palestine (`PS`) is excluded from the picker, suggestions and recovered region
-values. There is no search field. Arrow keys, Home/End, Page Up/Down, both Enter
+There is no search field. Arrow keys, Home/End, Page Up/Down, both Enter
 keys and country-initial cycling work, including English initials before a local
 keyboard has been chosen. Kirigami wheel input, the scrollbar and native touch
 flicking share the same list. Next aligns with the country rows.
@@ -355,6 +367,9 @@ legacy KWin keyboard-control interfaces are supported.
 Language, locale, region and keyboard lists retain native touchscreen dragging/flicking
 alongside one Kirigami wheel handler each. Touch scrolling does not activate rows;
 tapping selects a language/locale or adds a keyboard.
+List scrollbars appear only for actual vertical overflow, including after a
+search or resize. Their gutters remain reserved while hidden, keeping row widths
+and navigation-button alignment stable in both LTR and RTL.
 The up/down controls swap a selected layout with its neighbor and preserve the
 order for recovery and the created user's keyboard switching. The first layout
 is always the default; moving another layout to the top also changes the default.
@@ -444,12 +459,14 @@ KDE `GeoJsonDelegate` with its unsafe parent lookup is not instantiated, and no
 system KDE files or package data are modified. Map clicks synchronize with the
 localized search/list below; there is no duplicate map dropdown. The list
 reserves enough room for at least five entries, shrinking the map as needed on
-small displays. The list below its live search shows the selected geographic
-region's timezones until a
-query is entered. A selected timezone outside that region stays visible too.
-Searching covers English and native city/country names and
-IANA IDs across all installed choices. A region with exactly one timezone
-auto-selects it. For multi-zone regions, an existing timezone in that region is
+small displays. When search is empty, the list shows the selected geographic
+region's suggested timezones first, followed by every other timezone in
+localized alphabetical order, without duplicating the selected entry. A
+separate scrollbar gutter follows RTL/LTR direction, never overlaps the rows,
+and hides the scrollbar when the results are empty or already fit.
+Searching covers English and native city/country names and IANA IDs across
+the setup catalog. A region with exactly one timezone auto-selects it.
+For multi-zone regions, an existing timezone in that region is
 retained; otherwise selection is required instead of guessing a city. Explicit
 or recovered timezone choices survive region and language changes.
 
@@ -486,7 +503,18 @@ by KDE's bundled offline map tiles. No duplicate
 application wheel handler is installed on the framework-managed map. The results
 list uses the existing Kirigami handler and native touch flicking.
 
-Timezone city/country names use installed ICU data. KDE's map controls use its
+Timezone city/country names use installed ICU data. City names use ICU's public
+exemplar-city formatter with timezone-alias resolution and inherited regional
+translations, retaining explicit script choices. The original IANA ID remains
+unchanged for map selection, recovery and finalization. Search includes localized
+names, full English display names and the original IANA city/ID. Names without
+an installed translation retain ICU's fallback spelling. Geographic timezone
+cities appear first, with one UTC option at the very end of the list. UTC is
+never a regional suggestion or automatic default, but an explicit manual UTC
+choice is preserved by recovery. Other technical UTC/GMT aliases and their
+map areas are not offered. Russia, the U.S. and other multi-timezone regions
+show all of their timezone cities as suggestions before the global list.
+KDE's map controls use its
 existing gettext catalog; missing translations fall back to English. All 96
 language choices have translated page/search/fallback text, including Hebrew
 `אזורי זמן`. The bundled KDE Breeze

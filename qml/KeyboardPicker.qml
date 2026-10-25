@@ -12,6 +12,7 @@ ColumnLayout {
     property real uiScale: 1
     property alias searchText: searchField.text
     property alias resultsView: results
+    property alias verticalScrollBar: scrollbar
     property alias searchInput: searchField
     readonly property var selectedLayouts: selectedIds.map(id => layouts.find(layout => layout.id === id)).filter(layout => layout !== undefined)
     readonly property var filteredLayouts: layouts.filter(layout => !selectedIds.includes(layout.id) && searchKey(layout.name + " " + (layout.search || "") + " " + layout.id).includes(searchKey(searchField.text)))
@@ -346,9 +347,6 @@ ColumnLayout {
         rightPadding: leftPadding
         selectByMouse: true
         hoverEnabled: true
-        ToolTip.visible: hovered
-        ToolTip.delay: 600
-        ToolTip.text: picker.labels.search
         placeholderText: picker.labels.search
         placeholderTextColor: "transparent"
         Text {
@@ -501,12 +499,14 @@ ColumnLayout {
         }
         ScrollBar.vertical: ScrollBar {
             id: scrollbar
+            objectName: "keyboardResultsScrollBar"
             parent: results
             x: picker.rtl ? 0 : results.width - width
             y: 0
             height: results.height
             width: Math.max(8, Math.round(8 * picker.uiScale))
             policy: ScrollBar.AlwaysOn
+            visible: results.count > 0 && results.contentHeight > results.height + 1
             minimumSize: 0.04
         }
         Kirigami.WheelHandler {

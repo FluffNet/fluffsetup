@@ -9,18 +9,26 @@ type Countries = unsafe extern "C" fn() -> *const *const c_char;
 type DisplayCountry =
     unsafe extern "C" fn(*const c_char, *const c_char, *mut u16, i32, *mut i32) -> i32;
 type LikelySubtags = unsafe extern "C" fn(*const c_char, *mut c_char, i32, *mut i32) -> i32;
-type ResourceOpen = unsafe extern "C" fn(*const c_char, *const c_char, *mut i32) -> *mut c_void;
-type ResourceKey =
-    unsafe extern "C" fn(*const c_void, *const c_char, *mut c_void, *mut i32) -> *mut c_void;
-type ResourceString =
-    unsafe extern "C" fn(*const c_void, *const c_char, *mut i32, *mut i32) -> *const u16;
-type ResourceClose = unsafe extern "C" fn(*mut c_void);
+type CanonicalZone = unsafe extern "C" fn(*const u16, i32, *mut u16, i32, *mut i8, *mut i32) -> i32;
+type DateOpen = unsafe extern "C" fn(
+    i32,
+    i32,
+    *const c_char,
+    *const u16,
+    i32,
+    *const u16,
+    i32,
+    *mut i32,
+) -> *mut c_void;
+type DateFormat =
+    unsafe extern "C" fn(*const c_void, f64, *mut u16, i32, *mut c_void, *mut i32) -> i32;
+type DateClose = unsafe extern "C" fn(*mut c_void);
 
-struct Resources {
-    open: ResourceOpen,
-    key: ResourceKey,
-    string: ResourceString,
-    close: ResourceClose,
+struct DateNames {
+    canonical_zone: CanonicalZone,
+    open: DateOpen,
+    format: DateFormat,
+    close: DateClose,
 }
 
 #[cfg_attr(target_os = "linux", link(name = "dl"))]
@@ -34,7 +42,6 @@ struct Icu {
     countries: Countries,
     display_country: DisplayCountry,
     likely_subtags: Option<LikelySubtags>,
-    resources: Option<Resources>,
 }
 
 fn icu() -> Option<&'static Icu> {
@@ -75,17 +82,6 @@ fn icu() -> Option<&'static Icu> {
                     let likely = CString::new(format!("uloc_addLikelySubtags{suffix}")).unwrap();
                     // SAFETY: Same library/version as the documented APIs above.
                     let likely = unsafe { dlsym(handle, likely.as_ptr()) };
-                    let symbol = |name: &str| {
-                        let name = CString::new(format!("{name}{suffix}")).unwrap();
-                        // SAFETY: This version's documented ICU C resource APIs.
-                        unsafe { dlsym(handle, name.as_ptr()) }
-                    };
-                    let (open, key, string, close) = (
-                        symbol("ures_open"),
-                        symbol("ures_getByKey"),
-                        symbol("ures_getStringByKey"),
-                        symbol("ures_close"),
-                    );
                     return Some(Icu {
                         // SAFETY: Signatures match uloc.h (UChar=u16, UErrorCode=i32).
                         countries: unsafe {
@@ -102,24 +98,6 @@ fn icu() -> Option<&'static Icu> {
                                 std::mem::transmute::<*mut c_void, LikelySubtags>(likely)
                             })
                         },
-                        resources: if [open, key, string, close]
-                            .iter()
-                            .any(|pointer| pointer.is_null())
-                        {
-                            None
-                        } else {
-                            // SAFETY: Signatures match ures.h, same persistent handle.
-                            Some(unsafe {
-                                Resources {
-                                    open: std::mem::transmute::<*mut c_void, ResourceOpen>(open),
-                                    key: std::mem::transmute::<*mut c_void, ResourceKey>(key),
-                                    string: std::mem::transmute::<*mut c_void, ResourceString>(
-                                        string,
-                                    ),
-                                    close: std::mem::transmute::<*mut c_void, ResourceClose>(close),
-                                }
-                            })
-                        },
                     });
                 }
             }
@@ -131,6 +109,78 @@ fn icu() -> Option<&'static Icu> {
         None
     })
     .as_ref()
+}
+
+fn date_names() -> Option<&'static DateNames> {
+    static NAMES: OnceLock<Option<DateNames>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            let libraries: Vec<String> = vec![
+                "/opt/homebrew/opt/icu4c/lib/libicui18n.dylib".into(),
+                "/usr/lib/libicucore.A.dylib".into(),
+            ];
+            #[cfg(not(target_os = "macos"))]
+            let libraries: Vec<String> = std::iter::once("libicui18n.so".into())
+                .chain((50..=99).rev().map(|v| format!("libicui18n.so.{v}")))
+                .collect();
+            for library in libraries {
+                let library = CString::new(library).ok()?;
+                // SAFETY: NUL-terminated name, RTLD_LAZY. Successful handles stay
+                // loaded while their function pointers are cached for this process.
+                let handle = unsafe { dlopen(library.as_ptr(), 1) };
+                if handle.is_null() {
+                    continue;
+                }
+                for suffix in
+                    std::iter::once(String::new()).chain((50..=99).rev().map(|v| format!("_{v}")))
+                {
+                    let symbol = |name: &str| {
+                        let name = CString::new(format!("{name}{suffix}")).unwrap();
+                        // SAFETY: Public ICU C APIs, all from one library/version.
+                        unsafe { dlsym(handle, name.as_ptr()) }
+                    };
+                    let (canonical_zone, open, format, close) = (
+                        symbol("ucal_getCanonicalTimeZoneID"),
+                        symbol("udat_open"),
+                        symbol("udat_format"),
+                        symbol("udat_close"),
+                    );
+                    if [canonical_zone, open, format, close]
+                        .iter()
+                        .all(|symbol| !symbol.is_null())
+                    {
+                        // SAFETY: Signatures match udat.h/ucal.h (UDate=f64,
+                        // UChar=u16, UBool=int8_t, UErrorCode=int32_t).
+                        return Some(unsafe {
+                            DateNames {
+                                canonical_zone: std::mem::transmute::<*mut c_void, CanonicalZone>(
+                                    canonical_zone,
+                                ),
+                                open: std::mem::transmute::<*mut c_void, DateOpen>(open),
+                                format: std::mem::transmute::<*mut c_void, DateFormat>(format),
+                                close: std::mem::transmute::<*mut c_void, DateClose>(close),
+                            }
+                        });
+                    }
+                }
+                // SAFETY: No pointer escaped this unsuccessful handle.
+                unsafe { dlclose(handle) };
+            }
+            None
+        })
+        .as_ref()
+}
+
+fn name_locale(language: &str) -> Option<String> {
+    let base = crate::i18n::base_language(language)?;
+    // Project/glibc choice IDs differ from ICU's locale IDs for these two.
+    // Preserve every other language's explicit script and selected dialect.
+    Some(match base {
+        "quz" => format!("qu_{}", default_country(language)),
+        "ca_valencia" => "ca_ES_VALENCIA".into(),
+        _ => format!("{base}_{}", default_country(language)),
+    })
 }
 
 pub fn codes() -> &'static [String] {
@@ -246,9 +296,8 @@ pub fn suggested(language: &str) -> Vec<String> {
 }
 
 pub(crate) fn display_name(code: &str, language: &str) -> String {
-    let base = crate::i18n::base_language(language).unwrap_or("en");
     // Preserve script choices such as Serbian Latin and Traditional Chinese.
-    let locale = CString::new(format!("{base}_{}", default_country(language))).unwrap();
+    let locale = CString::new(name_locale(language).unwrap_or_else(|| "en_US".into())).unwrap();
     let country = CString::new(format!("und_{code}")).unwrap();
     if let Some(icu) = icu() {
         let mut buffer = [0u16; 512];
@@ -293,73 +342,92 @@ pub(crate) fn display_name(code: &str, language: &str) -> String {
 }
 
 /// CLDR exemplar-city names from the ICU data already installed with Qt/KDE.
+/// ICU's public VVV formatter resolves aliases and nested locale inheritance;
+/// directly walking zoneStrings loses names inherited by regional dialects.
 /// Missing names stay searchable via the English IANA city, never transliteration.
 pub(crate) fn timezone_city(zone: &str, language: &str) -> Option<String> {
-    struct Bundle<'a> {
+    struct Formatter<'a> {
         pointer: *mut c_void,
-        resources: &'a Resources,
+        names: &'a DateNames,
     }
-    impl Drop for Bundle<'_> {
+    impl Drop for Formatter<'_> {
         fn drop(&mut self) {
             if !self.pointer.is_null() {
-                // SAFETY: Every owned bundle is closed once, after copied strings.
-                unsafe { (self.resources.close)(self.pointer) };
+                // SAFETY: Every owned formatter is closed exactly once.
+                unsafe { (self.names.close)(self.pointer) };
             }
         }
     }
-    let resources = icu()?.resources.as_ref()?;
-    let base = crate::i18n::base_language(language)?;
-    let locale = CString::new(format!("{base}_{}", default_country(language))).ok()?;
-    let zone = CString::new(zone.replace('/', ":")).ok()?;
+    let names = date_names()?;
+    let locale = CString::new(name_locale(language)?).ok()?;
+    // UTC is not a city. Never label it as ICU's "Unknown City" fallback.
+    if zone == "UTC" || zone.starts_with("Etc/") || zone.len() > 128 || zone.contains('\0') {
+        return None;
+    }
+    // CLDR deliberately retains older canonical IDs for localized names (e.g.
+    // Asmera, Buenos_Aires, Saigon). Resolve aliases with the installed ICU's
+    // public API, not a frozen hand-maintained list. Only this display lookup
+    // changes: the actual IANA ID used by the map, recovery and finalization
+    // stays untouched.
+    let id = zone.encode_utf16().collect::<Vec<_>>();
+    let mut zone = [0u16; 256];
+    let mut known = 0;
     let mut status = 0;
-    // SAFETY: ICU's documented zone resource package and NUL-terminated locale.
-    let root = Bundle {
-        pointer: unsafe {
-            (resources.open)(c"ICUDATA-zone".as_ptr(), locale.as_ptr(), &mut status)
-        },
-        resources,
+    // SAFETY: Bounded UTF-16 input and writable output/flag/status pointers.
+    let length = unsafe {
+        (names.canonical_zone)(
+            id.as_ptr(),
+            id.len() as i32,
+            zone.as_mut_ptr(),
+            zone.len() as i32,
+            &mut known,
+            &mut status,
+        )
     };
-    if status > 0 || root.pointer.is_null() {
+    if status > 0 || known == 0 || !(1..zone.len() as i32).contains(&length) {
         return None;
     }
-    let zones = Bundle {
+    let zone = &zone[..length as usize];
+    let pattern = [b'V' as u16; 3];
+    status = 0;
+    // SAFETY: UDAT_PATTERN=-2 selects the supplied pattern. The UTF-16 inputs
+    // and their lengths remain valid through open; locale is NUL-terminated.
+    let formatter = Formatter {
         pointer: unsafe {
-            (resources.key)(
-                root.pointer,
-                c"zoneStrings".as_ptr(),
-                std::ptr::null_mut(),
-                &mut status,
-            )
-        },
-        resources,
-    };
-    if status > 0 || zones.pointer.is_null() {
-        return None;
-    }
-    let city = Bundle {
-        pointer: unsafe {
-            (resources.key)(
-                zones.pointer,
+            (names.open)(
+                -2,
+                -2,
+                locale.as_ptr(),
                 zone.as_ptr(),
-                std::ptr::null_mut(),
+                zone.len() as i32,
+                pattern.as_ptr(),
+                pattern.len() as i32,
                 &mut status,
             )
         },
-        resources,
+        names,
     };
-    if status > 0 || city.pointer.is_null() {
+    if status > 0 || formatter.pointer.is_null() {
         return None;
     }
-    let mut length = 0;
-    // SAFETY: Borrowed UTF-16 remains valid until city bundle is closed below.
-    let text =
-        unsafe { (resources.string)(city.pointer, c"ec".as_ptr(), &mut length, &mut status) };
-    if status > 0 || text.is_null() || !(1..=512).contains(&length) {
+    let mut buffer = [0u16; 512];
+    // SAFETY: Valid live formatter and writable buffer with the declared size.
+    // Only the exemplar-city field is formatted, so this fixed instant cannot
+    // affect the label or change the system clock, timezone or process locale.
+    let length = unsafe {
+        (names.format)(
+            formatter.pointer,
+            0.0,
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if status > 0 || !(1..buffer.len() as i32).contains(&length) {
         return None;
     }
-    Some(String::from_utf16_lossy(unsafe {
-        std::slice::from_raw_parts(text, length as usize)
-    }))
+    Some(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
 pub fn list_json(language: &str) -> String {
@@ -435,5 +503,71 @@ mod tests {
         assert_eq!(display_name("DE", "de"), "Deutschland");
         assert_ne!(display_name("DE", "fr"), display_name("DE", "de"));
         assert!(suggested("fr").contains(&"BE".into()));
+    }
+    #[test]
+    fn timezone_names_resolve_cldr_aliases_without_changing_the_zone() {
+        for (zone, city) in [
+            ("Africa/Asmara", "אסמרה"),
+            ("America/Argentina/Buenos_Aires", "בואנוס איירס"),
+            ("Asia/Ho_Chi_Minh", "הו צ׳י מין סיטי"),
+        ] {
+            assert_eq!(timezone_city(zone, "he").as_deref(), Some(city), "{zone}");
+        }
+        let languages = crate::i18n::LANGUAGES
+            .iter()
+            .copied()
+            .chain(crate::i18n::regions().iter().map(|region| region.code));
+        for language in languages {
+            for (modern, legacy) in [
+                ("Africa/Asmara", "Africa/Asmera"),
+                ("America/Argentina/Buenos_Aires", "America/Buenos_Aires"),
+                ("America/Atikokan", "America/Coral_Harbour"),
+                ("America/Indiana/Indianapolis", "America/Indianapolis"),
+                ("Asia/Ho_Chi_Minh", "Asia/Saigon"),
+                ("Asia/Kolkata", "Asia/Calcutta"),
+                ("Asia/Kathmandu", "Asia/Katmandu"),
+                ("Asia/Yangon", "Asia/Rangoon"),
+                ("Atlantic/Faroe", "Atlantic/Faeroe"),
+                ("Europe/Kyiv", "Europe/Kiev"),
+                ("Pacific/Chuuk", "Pacific/Truk"),
+                ("Pacific/Kanton", "Pacific/Enderbury"),
+                ("Pacific/Pohnpei", "Pacific/Ponape"),
+            ] {
+                let city = timezone_city(modern, language);
+                assert!(city.is_some(), "{language}: {modern}");
+                assert_eq!(
+                    city,
+                    timezone_city(legacy, language),
+                    "{language}: {modern}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn city_names_preserve_dialect_script_and_locale_aliases() {
+        for (language, id, city) in [
+            ("fr_CA", "Europe/London", "Londres"),
+            ("pt_PT", "Europe/Moscow", "Moscovo"),
+            ("pt_BR", "Europe/Moscow", "Moscou"),
+            ("sr", "Europe/Belgrade", "Београд"),
+            ("sr_Latn", "Europe/Belgrade", "Beograd"),
+            ("zh_Hans", "Asia/Tokyo", "东京"),
+            ("zh_Hant", "Asia/Tokyo", "東京"),
+        ] {
+            assert_eq!(
+                timezone_city(id, language).as_deref(),
+                Some(city),
+                "{language}"
+            );
+        }
+        assert_eq!(name_locale("quz").as_deref(), Some("qu_PE"));
+        assert_eq!(
+            name_locale("ca_valencia").as_deref(),
+            Some("ca_ES_VALENCIA")
+        );
+        for zone in ["UTC", "Etc/UTC", "Not/A_Real_Zone", "Asia/Tokyo\0junk"] {
+            assert_eq!(timezone_city(zone, "he"), None, "{zone}");
+        }
+        assert_eq!(timezone_city("Asia/Tokyo", "not-a-language"), None);
     }
 }

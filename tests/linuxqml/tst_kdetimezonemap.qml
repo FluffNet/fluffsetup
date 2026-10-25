@@ -49,6 +49,24 @@ Item {
             compare(map.mapItem.zoomLevel, map.mapItem.maximumZoomLevel)
             verify(!items(map).some(item => item.chooseText !== undefined && item.currentText !== undefined && item.visible))
         }
+        function test_technical_utc_area_is_not_selectable() {
+            selection.clear()
+            verify(!map.surface.availableMapTimeZones.includes("UTC"))
+            verify(!map.surface.availableMapTimeZones.includes("Etc/UTC"))
+            map.surface.chooseTimezone("UTC")
+            map.surface.chooseTimezone("Etc/UTC")
+            compare(selection.count, 0)
+            compare(map.highlightedZone, "Asia/Jerusalem")
+        }
+        function test_manual_utc_uses_a_neutral_world_view() {
+            map.zone = "UTC"
+            map.center = null
+            tryVerify(() => map.fittedZone === "UTC" && !map.fitting, 5000)
+            compare(map.areaBounds, null)
+            verify(Math.abs(map.mapItem.zoomLevel - map.mapItem.minimumZoomLevel) < 0.01)
+            verify(Math.abs(map.mapItem.center.latitude) < 0.01)
+            verify(Math.abs(map.mapItem.center.longitude) < 0.01)
+        }
         function test_external_selection_centers_without_echoing_selection() {
             selection.clear()
             map.center = [40.7141667, -74.0063889]
@@ -71,6 +89,8 @@ Item {
             // Explore away from the close initial fit before clicking France.
             map.mapItem.zoomLevel = 2
             wait(200)
+            map.mapItem.update()
+            verify(waitForRendering(map,2000))
             const point = map.mapItem.fromCoordinate(QtPositioning.coordinate(48.8566, 2.3522), false)
             verify(map.surface.availableMapTimeZones.includes("Europe/Paris"))
             verify(map.surface.validTimeZones.includes("Europe/Paris"))
@@ -84,7 +104,8 @@ Item {
             mouseDrag(map.mapItem, 500, 200, 100, 30)
             tryVerify(() => Math.abs(map.mapItem.center.longitude - before) > 0.01)
         }
-        function test_zoom_buttons_wheel_and_touch_pinch() {
+        function test_zoom_buttons_and_wheel() {
+            selection.clear()
             const buttons = items(map).filter(item => item.clicked !== undefined && item.icon !== undefined && ["zoom-in-map-symbolic", "zoom-out-map-symbolic"].includes(item.icon.name))
             compare(buttons.length, 2)
             const plus = buttons.find(item => item.icon.name === "zoom-in-map-symbolic")
@@ -96,12 +117,19 @@ Item {
             tryVerify(() => Math.abs(map.mapItem.zoomLevel - before) < 0.05)
             mouseWheel(map.mapItem, 400, 120, 0, -120)
             tryVerify(() => map.mapItem.zoomLevel < before)
+            compare(selection.count,0,"Zoom controls must not select the area behind them")
+        }
+        function test_touch_pinch() {
+            selection.clear()
             // Qt's native pinch scale reserves one zoom level of headroom.
             // Start farther below KDE's tile ceiling to exercise a real pinch,
             // rather than mistaking a tap-triggered re-fit for pinch zooming.
             map.mapItem.zoomLevel = map.mapItem.maximumZoomLevel - 2
             wait(200)
+            map.mapItem.update()
+            verify(waitForRendering(map,2000))
             const touch = touchEvent(map.mapItem)
+            const pinch = Array.from(map.mapItem.resources).find(item => item instanceof PinchHandler)
             const start = map.mapItem.zoomLevel
             touch.press(0, map.mapItem, 430, 190).press(1, map.mapItem, 530, 190).commit()
             wait(20)
@@ -109,9 +137,25 @@ Item {
                 touch.move(0, map.mapItem, 430 - step * 10, 190).move(1, map.mapItem, 530 + step * 10, 190).commit()
                 wait(20)
             }
-            tryVerify(() => map.mapItem.zoomLevel > start + 0.1)
+            const zoomAfterGesture = map.mapItem.zoomLevel
+            const pinching = pinch.active
             touch.release(0, map.mapItem).release(1, map.mapItem).commit()
+            verify(pinching,"The two-finger gesture did not activate the native pinch handler")
+            verify(zoomAfterGesture > start + 0.1)
             verify(map.mapItem.zoomLevel <= map.mapItem.maximumZoomLevel + 0.01)
+            compare(selection.count,0,"Pinching must not turn into a map selection")
+        }
+        function test_native_zoom_handlers_are_not_duplicated() {
+            const handlers = Array.from(map.mapItem.resources)
+            const wheels = handlers.filter(item => item instanceof WheelHandler && item.enabled)
+            const pinches = handlers.filter(item => item instanceof PinchHandler && item.enabled)
+            compare(wheels.length,1)
+            compare(pinches.length,1)
+            verify(wheels[0].acceptedDevices & PointerDevice.Mouse)
+            verify(pinches[0].acceptedDevices & PointerDevice.TouchPad)
+            verify(pinches[0].acceptedDevices & PointerDevice.TouchScreen)
+            if (["wayland","cocoa"].includes(Qt.platform.pluginName))
+                verify(wheels[0].acceptedDevices & PointerDevice.TouchPad)
         }
         function test_zoom_button_design_and_limits() {
             const plus = findChild(map, "fluff-timezone-zoom-in")

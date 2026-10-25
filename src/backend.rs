@@ -242,8 +242,9 @@ impl Default for SetupBackendRust {
             )),
             timezone_customized: (!crate::preview_mode()
                 && progress.timezone_customized
-                && crate::timezone::valid(&progress.timezone))
-                || crate::preview_argument("timezone").is_some(),
+                && crate::timezone::selectable(&progress.timezone))
+                || crate::preview_argument("timezone")
+                    .is_some_and(|id| crate::timezone::selectable(&id)),
             clock_synchronized: preview_clock,
             clock_sync_inflight: false,
             clock_gate: if preview_clock {
@@ -626,7 +627,7 @@ impl qobject::SetupBackend {
 
     pub fn select_timezone(mut self: Pin<&mut Self>, id: &QString) {
         let id = id.to_string();
-        if !*self.busy() && !*self.completed() && crate::timezone::valid(&id) {
+        if !*self.busy() && !*self.completed() && crate::timezone::selectable(&id) {
             self.as_mut().rust_mut().timezone_customized = true;
             self.as_mut().set_selected_timezone(QString::from(&id));
         }
@@ -788,7 +789,7 @@ impl qobject::SetupBackend {
                 .set_error_message(QString::from(&crate::i18n::translate("setupError")));
             return;
         }
-        if !crate::timezone::valid(&self.selected_timezone().to_string()) {
+        if !crate::timezone::selectable(&self.selected_timezone().to_string()) {
             self.as_mut()
                 .set_error_message(QString::from(&crate::i18n::translate("setupError")));
             return;
@@ -919,6 +920,7 @@ fn apply_in_child(details: [&str; 8]) -> Result<(), String> {
         std::env::current_exe().map_err(|error| format!("Cannot locate FluffSetup: {error}"))?;
     let mut child = Command::new(executable)
         .arg("--apply-setup")
+        .arg(std::process::id().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

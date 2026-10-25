@@ -240,6 +240,10 @@ ApplicationWindow {
                 backend.selectTimezone("../etc/passwd")
                 if (backend.selectedTimezone !== "Europe/London")
                     issues.push({timezone: "Invalid timezone changed the selection"})
+                backend.selectTimezone("UTC")
+                if (backend.selectedTimezone !== "UTC")
+                    issues.push({timezone: "Explicit UTC choice was rejected"})
+                backend.selectTimezone("Europe/London")
                 backend.selectRegion("JP")
                 backend.selectLanguage("he")
                 if (backend.selectedTimezone !== "Europe/London")
@@ -454,6 +458,11 @@ ApplicationWindow {
                 }
                 if ([0, 6, 8].includes(pages.currentIndex)) {
                     const picker = pages.currentIndex === 0 ? languagePicker : pages.currentIndex === 6 ? regionPicker : countryPicker
+                    const overflow = picker.count > 0 && picker.contentHeight > picker.height + 1
+                    if (picker.verticalScrollBar.visible !== overflow)
+                        issues.push({list: "Scrollbar visibility disagrees with actual overflow"})
+                    if (overflow && picker.verticalScrollBar.contentItem.opacity <= 0)
+                        issues.push({list: "Overflowing list's scrollbar thumb is transparent"})
                     const button = pages.currentIndex === 0 ? languageNextButton : pages.currentIndex === 6 ? regionNextButton : countryNextButton
                     const row = picker.currentItem
                     if (!row) issues.push({list: "Missing selected row"})
@@ -492,6 +501,11 @@ ApplicationWindow {
                     if (keyboardPicker.resultsView.height < 60 * window.uiScale - 1)
                         issues.push({keyboard: "Keyboard results have no usable viewport"})
                     const view = keyboardPicker.resultsView
+                    const overflow = view.count > 0 && view.contentHeight > view.height + 1
+                    if (keyboardPicker.verticalScrollBar.visible !== overflow)
+                        issues.push({keyboard: "Scrollbar visibility disagrees with actual overflow"})
+                    if (overflow && keyboardPicker.verticalScrollBar.contentItem.opacity <= 0)
+                        issues.push({keyboard: "Overflowing list's scrollbar thumb is transparent"})
                     const row = view.itemAtIndex(0)
                     const rowPosition = row ? row.mapToItem(setupSurface, 0, 0)
                         : view.mapToItem(setupSurface, window.rtl ? view.leftMargin : view.width - view.rightMargin, 0)
@@ -521,7 +535,9 @@ ApplicationWindow {
                             issues.push({timezone: "Selected area framing has not settled"})
                         if (adapter.viewportWidth > adapter.width + 1 || adapter.viewportHeight > adapter.height + 1)
                             issues.push({timezone: "Map viewport exceeds its frame"})
-                        for (const coordinate of adapter.selectedCoordinates()) {
+                        // Check the actual camera target. Perth frames its
+                        // Australian pieces while retaining Antarctic geometry.
+                        for (const coordinate of adapter.selectedCoordinates(true)) {
                             const point = map.fromCoordinate(coordinate, false)
                             if (!Number.isFinite(point.x) || !Number.isFinite(point.y)
                                     || point.x < adapter.fitMargin - 1 || point.x > map.width - adapter.fitMargin + 1
@@ -539,6 +555,30 @@ ApplicationWindow {
                         issues.push({timezone: "Search colors depend on the desktop theme"})
                     if (timezonePicker.searchInput.horizontalAlignment !== window.bodyAlignment)
                         issues.push({timezone: "Incorrect search alignment"})
+                    const view = timezonePicker.resultView
+                    const bar = view.verticalScrollBar
+                    const overflow = view.count > 0 && view.contentHeight > view.height + 1
+                    if (bar.visible !== overflow)
+                        issues.push({timezone: "Scrollbar shown without overflowing results"})
+                    const listPosition = view.mapToItem(setupSurface, 0, 0)
+                    const barPosition = bar.mapToItem(setupSurface, 0, 0)
+                    if (bar.visible && (window.rtl
+                            ? barPosition.x + bar.width > listPosition.x + 1
+                            : barPosition.x < listPosition.x + view.width - 1))
+                        issues.push({timezone: "Scrollbar overlaps the result rows"})
+                    const nextPosition = timezoneNextButton.mapToItem(setupSurface, 0, 0)
+                    const nextEdge = window.rtl ? nextPosition.x : nextPosition.x + timezoneNextButton.width
+                    const rowEdge = window.rtl ? listPosition.x : listPosition.x + view.width
+                    if (Math.abs(nextEdge - rowEdge) > 1)
+                        issues.push({timezone: "Next button does not align with result rows"})
+                    if (!timezonePicker.searchText.trim().length
+                            && timezonePicker.filteredZones.length !== timezonePicker.zones.length)
+                        issues.push({timezone: "Empty search hides part of the timezone catalog"})
+                    const utc = timezonePicker.zones.findIndex(zone => zone.code === "UTC")
+                    if (utc >= 0 && (utc !== timezonePicker.zones.length - 1 || timezonePicker.zones[utc].suggested))
+                        issues.push({timezone: "UTC is not a final, non-suggested manual choice"})
+                    if (timezonePicker.zones.some(zone => zone.code.startsWith("Etc/")))
+                        issues.push({timezone: "Duplicate technical timezone offered in the picker"})
                 }
                 if (pages.currentIndex !== 9 && timezonePicker.mapItem !== null)
                     issues.push({timezone: "Native map loaded before the timezone page's first visit"})
@@ -550,6 +590,12 @@ ApplicationWindow {
                                 countryCount: countryPicker.count,
                                 timezone: backend.selectedTimezone,
                                 timezoneResults: timezonePicker.filteredZones.length,
+                                timezoneCatalogCount: timezonePicker.zones.length,
+                                timezoneScrollbarVisible: timezonePicker.resultView.verticalScrollBar.visible,
+                                pickerScrollbarVisible: pages.currentIndex === 0 ? languagePicker.verticalScrollBar.visible
+                                    : pages.currentIndex === 6 ? regionPicker.verticalScrollBar.visible
+                                    : pages.currentIndex === 8 ? countryPicker.verticalScrollBar.visible : null,
+                                keyboardScrollbarVisible: pages.currentIndex === 7 ? keyboardPicker.verticalScrollBar.visible : null,
                                 timezoneClock: window.timezoneClock,
                                 clockTicks: window.clockTick,
                                 mapLoaded: timezonePicker.mapItem !== null,
@@ -1580,6 +1626,7 @@ ApplicationWindow {
                             zones: JSON.parse(backend.timezoneList(backend.selectedLanguage, backend.selectedRegion))
                             selectedCode: backend.selectedTimezone
                             language: backend.selectedLanguage
+                            region: backend.selectedRegion
                             rtl: window.rtl
                             uiScale: window.uiScale
                             searchPlaceholder: window.tr("timezoneSearch")
@@ -1596,7 +1643,7 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            Layout.rightMargin: timezonePicker.resultView.leftMargin + timezonePicker.resultView.rightMargin
+                            Layout.rightMargin: timezonePicker.resultsGutter
                             SecondaryButton {
                                 id: timezoneBackButton
                                 text: window.backText

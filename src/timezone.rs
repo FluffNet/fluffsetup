@@ -108,6 +108,15 @@ pub fn valid(id: &str) -> bool {
     valid_in(id, Path::new("/usr/share/zoneinfo"))
 }
 
+// FluffSetup's selection policy, not an IANA alias or a change to tzdata.
+// Normalize old saved choices as well as keeping them out of the new catalog.
+pub fn choice_id(id: &str) -> &str {
+    match id {
+        "Asia/Gaza" | "Asia/Hebron" => "Asia/Jerusalem",
+        _ => id,
+    }
+}
+
 fn zones() -> &'static [Zone] {
     static ZONES: OnceLock<Vec<Zone>> = OnceLock::new();
     ZONES.get_or_init(|| {
@@ -116,7 +125,11 @@ fn zones() -> &'static [Zone] {
             .or_else(|_| fs::read_to_string(root.join("zone1970.tab")))
             .unwrap_or_default();
         let mut zones = parse_table(&text);
-        zones.retain(|zone| valid(&zone.id));
+        // Geographic cities are the main choices. UTC is a deliberate manual
+        // alternative, never a regional suggestion or automatic default.
+        zones.retain(|zone| {
+            !zone.countries.is_empty() && choice_id(&zone.id) == zone.id && valid(&zone.id)
+        });
         if valid("UTC") {
             zones.push(Zone {
                 id: "UTC".into(),
@@ -128,6 +141,10 @@ fn zones() -> &'static [Zone] {
         zones.dedup_by(|a, b| a.id == b.id);
         zones
     })
+}
+
+pub fn selectable(id: &str) -> bool {
+    zones().iter().any(|zone| zone.id == id)
 }
 
 pub fn current() -> String {
@@ -145,7 +162,8 @@ pub fn current() -> String {
 }
 
 pub fn initial(saved: &str, region: &str) -> String {
-    if valid(saved) {
+    let saved = choice_id(saved);
+    if selectable(saved) {
         return saved.into();
     }
     regional_default(zones(), region, &current())
@@ -163,29 +181,54 @@ fn regional_default(zones: &[Zone], region: &str, current: &str) -> String {
         current.into()
     } else if !matches.is_empty() {
         String::new()
-    } else {
+    } else if zones
+        .iter()
+        .any(|zone| !zone.countries.is_empty() && zone.id == current)
+    {
         current.into()
+    } else {
+        String::new()
     }
 }
 
 pub fn list(language: &str, region: &str) -> String {
     // Translate once per language. A region change only reorders suggestions.
     type Row = (usize, String, String, String);
+    static ENGLISH_CITIES: OnceLock<Vec<String>> = OnceLock::new();
     static CACHE: OnceLock<Mutex<HashMap<String, Vec<Row>>>> = OnceLock::new();
+    let english_cities = ENGLISH_CITIES.get_or_init(|| {
+        zones()
+            .iter()
+            .map(|zone| {
+                crate::country::timezone_city(&zone.id, "en").unwrap_or_else(|| {
+                    zone.id
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&zone.id)
+                        .replace('_', " ")
+                })
+            })
+            .collect()
+    });
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     let rows = cache.entry(language.into()).or_insert_with(|| {
         zones()
             .iter()
             .enumerate()
             .map(|(index, zone)| {
-                let english_city = zone
+                let iana_city = zone
                     .id
                     .rsplit('/')
                     .next()
                     .unwrap_or(&zone.id)
                     .replace('_', " ");
-                let city = crate::country::timezone_city(&zone.id, language)
-                    .unwrap_or_else(|| english_city.clone());
+                let english_city = english_cities[index].clone();
+                let city = if language == "en" {
+                    english_city.clone()
+                } else {
+                    crate::country::timezone_city(&zone.id, language)
+                        .unwrap_or_else(|| english_city.clone())
+                };
                 let countries = zone
                     .countries
                     .iter()
@@ -204,7 +247,7 @@ pub fn list(language: &str, region: &str) -> String {
                     format!("{city} ({countries})")
                 };
                 let search = format!(
-                    "{label} {city} {countries} {english_city} {english} {} {} {}",
+                    "{label} {city} {countries} {english_city} {iana_city} {english} {} {} {}",
                     zone.id.replace('_', " "),
                     zone.id,
                     zone.countries.join(" ")
@@ -216,7 +259,11 @@ pub fn list(language: &str, region: &str) -> String {
     let suggested = |index: usize| zones()[index].countries.iter().any(|code| code == region);
     let mut ordered = rows.iter().collect::<Vec<_>>();
     ordered.sort_by_cached_key(|(index, label, _, _)| {
-        (!suggested(*index), crate::i18n::country_sort_key(label))
+        (
+            zones()[*index].countries.is_empty(),
+            !suggested(*index),
+            crate::i18n::country_sort_key(label),
+        )
     });
     let rows = ordered.into_iter().map(|(index, label, english, search)| {
         let zone = &zones()[*index];
@@ -251,6 +298,29 @@ fn apply_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_catalog_excludes_combined_areas_in_every_language_and_recovers_old_choices() {
+        for id in ["Asia/Gaza", "Asia/Hebron"] {
+            assert!(valid(id)); // System timezone files remain untouched.
+            assert!(!selectable(id));
+            assert_eq!(choice_id(id), "Asia/Jerusalem");
+            for region in ["IL", "US", "FR"] {
+                assert_eq!(initial(id, region), "Asia/Jerusalem");
+            }
+        }
+        for language in crate::i18n::LANGUAGES
+            .iter()
+            .copied()
+            .chain(crate::i18n::regions().iter().map(|region| region.code))
+        {
+            let catalog = list(language, "IL");
+            assert!(!catalog.contains("Asia/Gaza"), "{language}");
+            assert!(!catalog.contains("Asia/Hebron"), "{language}");
+            assert_eq!(catalog.matches("\"code\":\"Asia/Jerusalem\"").count(), 1);
+        }
+        assert_eq!(choice_id("Europe/London"), "Europe/London");
+        assert_eq!(choice_id("UTC"), "UTC");
+    }
     #[test]
     fn unsafe_ids_and_non_timezone_files_are_rejected() {
         for id in [
@@ -320,7 +390,14 @@ mod tests {
             assert_eq!(regional_default(zones, country, &zone.id), zone.id);
             assert_eq!(initial("Europe/Brussels", country), "Europe/Brussels");
         }
-        assert_eq!(regional_default(zones, "XX", "UTC"), "UTC");
+        assert_eq!(regional_default(zones, "XX", "UTC"), "");
+        assert_eq!(
+            regional_default(zones, "XX", "Europe/Paris"),
+            "Europe/Paris"
+        );
+        for country in ["US", "RU"] {
+            assert_eq!(regional_default(zones, country, "UTC"), "");
+        }
     }
     #[test]
     fn finalization_only_sets_timezone_and_propagates_failures() {
@@ -359,6 +436,7 @@ mod tests {
         for zone in zones() {
             assert!(valid(&zone.id));
             if zone.id != "UTC" {
+                assert!(!zone.countries.is_empty(), "{}", zone.id);
                 assert!(zone.coordinate.is_some(), "{}", zone.id);
             }
         }
@@ -390,6 +468,37 @@ mod tests {
         assert_eq!(initial("Europe/Brussels", "IL"), "Europe/Brussels");
     }
     #[test]
+    fn browse_catalog_contains_every_zone_after_regional_suggestions() {
+        for language in ["en", "he", "de", "ar"] {
+            for region in ["IL", "US", "RU", "XX"] {
+                let catalog = list(language, region);
+                assert_eq!(catalog.matches("\"code\":").count(), zones().len());
+                let suggested = zones()
+                    .iter()
+                    .filter(|zone| zone.countries.iter().any(|country| country == region))
+                    .count();
+                let flags = catalog.split("\"suggested\":").skip(1).collect::<Vec<_>>();
+                assert!(
+                    flags[..suggested]
+                        .iter()
+                        .all(|value| value.starts_with("true"))
+                );
+                assert!(
+                    flags[suggested..]
+                        .iter()
+                        .all(|value| value.starts_with("false"))
+                );
+            }
+        }
+        let english = list("en", "IL");
+        assert!(english.starts_with("[{\"code\":\"Asia/Jerusalem\""));
+        assert!(
+            english.find("\"label\":\"Abidjan ").unwrap()
+                < english.find("\"label\":\"Accra ").unwrap()
+        );
+        assert_eq!(english.matches("\"code\":\"Asia/Jerusalem\"").count(), 1);
+    }
+    #[test]
     fn localized_names_work_beyond_hebrew_without_losing_english_search() {
         for (language, id, native, english) in [
             ("fr", "Europe/London", "Londres", "London"),
@@ -409,6 +518,111 @@ mod tests {
             assert!(
                 rows.contains(native) && rows.contains(english),
                 "{language}"
+            );
+        }
+    }
+    #[test]
+    fn city_display_names_cover_all_languages_and_dialects() {
+        let known = zones()
+            .iter()
+            .filter(|zone| !zone.countries.is_empty())
+            .map(|zone| (zone, crate::country::timezone_city(&zone.id, "en")))
+            .collect::<Vec<_>>();
+        let languages = crate::i18n::LANGUAGES
+            .iter()
+            .copied()
+            .chain(crate::i18n::regions().iter().map(|region| region.code));
+        for language in languages {
+            for (zone, english) in &known {
+                let city = crate::country::timezone_city(&zone.id, language);
+                // A newly installed tzdata zone may not exist in an older ICU.
+                // That fallback must be language-independent, never an invented
+                // city or an unrelated system timezone such as GMT.
+                assert_eq!(city.is_some(), english.is_some(), "{language}: {}", zone.id);
+                if let Some(city) = city {
+                    assert!(
+                        !city.trim().is_empty() && !city.contains('\0'),
+                        "{language}: {}",
+                        zone.id
+                    );
+                    if language == "he" {
+                        assert!(
+                            city.chars().any(|c| ('\u{0590}'..='\u{05ff}').contains(&c)),
+                            "Unlocalized Hebrew city {}: {city}",
+                            zone.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn city_labels_keep_original_ids_and_full_english_search_names() {
+        for language in [
+            "he",
+            "ar",
+            "de",
+            "fr_CA",
+            "ja",
+            "sr_Latn",
+            "quz",
+            "ca_valencia",
+        ] {
+            let rows = list(language, "IL");
+            for (id, english) in [
+                ("Africa/Asmara", "Asmara"),
+                ("America/Argentina/Buenos_Aires", "Buenos Aires"),
+                ("Asia/Ho_Chi_Minh", "Ho Chi Minh City"),
+            ] {
+                let row = rows
+                    .split("},{")
+                    .find(|row| row.contains(&format!("\"code\":\"{id}\"")))
+                    .unwrap();
+                assert!(
+                    row.contains(english),
+                    "Missing English search name for {id} in {language}"
+                );
+                assert!(row.contains(&format!("\"code\":\"{id}\"")));
+            }
+            assert!(
+                rows.rsplit("},{")
+                    .next()
+                    .unwrap()
+                    .contains("\"code\":\"UTC\"")
+            );
+            assert_eq!(rows.matches("\"code\":\"UTC\"").count(), 1);
+        }
+    }
+    #[test]
+    fn utc_is_a_manual_last_choice_and_never_a_regional_suggestion() {
+        assert!(valid("UTC")); // Internal clock/date operations still support UTC.
+        assert!(selectable("UTC"));
+        assert_eq!(initial("UTC", "IL"), "UTC"); // Explicit manual choice.
+        for id in ["Etc/UTC", "Etc/GMT", "GMT"] {
+            assert!(!selectable(id));
+            assert_eq!(initial(id, "IL"), "Asia/Jerusalem");
+        }
+        for region in ["US", "RU"] {
+            let rows = list("en", region);
+            let utc = rows.rsplit("},{").next().unwrap();
+            assert!(utc.contains("\"code\":\"UTC\"") && utc.contains("\"suggested\":false"));
+            assert!(rows.matches("\"suggested\":true").count() > 1);
+            assert!(rows.contains(if region == "RU" { "Moscow" } else { "New York" }));
+            let expected = zones()
+                .iter()
+                .filter(|zone| zone.countries.iter().any(|country| country == region))
+                .count();
+            assert_eq!(rows.matches("\"suggested\":true").count(), expected);
+            let flags = rows.split("\"suggested\":").skip(1).collect::<Vec<_>>();
+            assert!(
+                flags[..expected]
+                    .iter()
+                    .all(|flag| flag.starts_with("true"))
+            );
+            assert!(
+                flags[expected..]
+                    .iter()
+                    .all(|flag| flag.starts_with("false"))
             );
         }
     }
