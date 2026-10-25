@@ -7,6 +7,8 @@ Item {
     property string zone: ""
     property string language: "en"
     property var center: null
+    property var initialBounds: null
+    property var initialZones: []
     property real preferredZoom: 4
     property var mapText: (context, source) => source
     readonly property var mapItem: selector.map
@@ -32,7 +34,7 @@ Item {
         height: root.viewportHeight
         selectedTimeZone: root.zone
         initialCenter: root.center
-        initialZoom: root.zone.length ? 4.9 : root.preferredZoom
+        initialZoom: root.zone === "UTC" ? 0 : root.zone.length ? 4.9 : root.preferredZoom
         opacity: root.fittedZone === root.zone && !root.fitting ? 1 : 0
         enabled: !root.fitting
         mapText: (context, source) => {
@@ -41,16 +43,29 @@ Item {
         }
         onZoneSelected: id => root.zoneSelected(id)
     }
-    // Fit the complete geometry without waiting for visual delegates to render.
-    function selectedCoordinates() {
+    // Read native geometry without waiting for visual delegates to render.
+    // The default preserves every part for selection and coverage checks.
+    function selectedCoordinates(forFraming = false) {
         const coordinates = []
-        for (const row of selector.polygons)
-            if (row.tzid === selector.selectedTimeZone)
-                for (const coordinate of row.coordinates) coordinates.push(coordinate)
+        for (const row of selector.polygons) {
+            if (row.tzid !== selector.selectedTimeZone) continue
+            // Perth's native area also contains a detached Antarctic wedge.
+            // Frame its Australian mainland/offshore pieces, not that wedge.
+            // Do not alter the polygons used for rendering or selection.
+            if (forFraming && root.zone === "Australia/Perth" && row.bounds.topLeft.latitude < -60) continue
+            for (const coordinate of row.coordinates) coordinates.push(coordinate)
+        }
         return coordinates
     }
-    function selectedBounds() {
-        const coordinates = selectedCoordinates()
+    function selectedBounds(forFraming = false) {
+        const coordinates = selectedCoordinates(forFraming)
+        return coordinates.length ? QtPositioning.rectangle(coordinates) : null
+    }
+    function regionalBounds() {
+        const coordinates = []
+        for (const row of selector.polygons)
+            if (root.initialZones.includes(row.tzid))
+                for (const coordinate of row.coordinates) coordinates.push(coordinate)
         return coordinates.length ? QtPositioning.rectangle(coordinates) : null
     }
     function fitViewport(bounds) {
@@ -82,7 +97,25 @@ Item {
         // The native fit sets center before zoom, so a cold portrait map can
         // temporarily clamp that center at its previous minimum zoom. Derive
         // the same Mercator midpoint from the outline, not that clamped getter.
-        root.targetCenter = QtPositioning.mercatorToCoord(Qt.point((top.x + spanX / 2) % 1, (top.y + bottom.y) / 2))
+        let centerX = (top.x + spanX / 2) % 1
+        if (root.zone === "Australia/Perth") {
+            const australian = []
+            for (const row of selector.polygons)
+                if (row.tzid.startsWith("Australia/") && row.bounds.topLeft.latitude >= -60)
+                    for (const coordinate of row.coordinates) australian.push(coordinate)
+            if (australian.length) {
+                const context = QtPositioning.rectangle(australian)
+                const contextLeft = QtPositioning.coordToMercator(context.topLeft).x
+                const contextX = (contextLeft + context.width / 720) % 1
+                const pixels = 256 * Math.pow(2, mapItem.zoomLevel)
+                // Balance some of the wider Australian context without losing
+                // the selected outline's padding. Narrow maps may have no spare room.
+                const spare = Math.max(0, (mapItem.width - spanX * pixels) / 2 - fitMargin)
+                const offset = ((contextX - centerX + 1.5) % 1 - 0.5) * pixels / 2
+                centerX = (centerX + Math.max(-spare, Math.min(spare, offset)) / pixels + 1) % 1
+            }
+        }
+        root.targetCenter = QtPositioning.mercatorToCoord(Qt.point(centerX, (top.y + bottom.y) / 2))
         root.targetZoom = mapItem.zoomLevel
         settleTimer.passes = 0
         settleTimer.restart()
@@ -191,12 +224,25 @@ Item {
                 return
             }
             root.styleZoomButtons(selector)
-            const bounds = root.selectedBounds()
-            // The offline Web Mercator map cannot display the far-polar parts
-            // of these outlines. Preserve the existing point/zoom fallback for
-            // those cases; do not shrink them to a broken microscopic viewport.
-            root.polarCoverageLimited = bounds !== null && (bounds.topLeft.latitude > 85.05112878 || bounds.bottomRight.latitude < -85.05112878)
-            if (bounds && !root.polarCoverageLimited) {
+            if (root.zone === "UTC") {
+                // A manual UTC choice has no geographic area to fit. Show a
+                // neutral world view instead of retaining the previous city.
+                root.fittedZone = root.zone
+                root.targetCenter = QtPositioning.coordinate(0, 0)
+                root.targetZoom = root.mapItem.minimumZoomLevel
+                settleTimer.passes = 0
+                settleTimer.restart()
+                stop()
+                return
+            }
+            const fullBounds = root.zone.length ? root.selectedBounds() : root.initialBounds || root.regionalBounds()
+            const bounds = root.zone === "Australia/Perth" ? root.selectedBounds(true) : fullBounds
+            // Other far-polar outlines retain the existing point/zoom fallback;
+            // do not shrink unsupported areas to a broken microscopic viewport.
+            // Keep reporting the full native area's coverage limit even when
+            // Perth's supported Australian portion can be fitted correctly.
+            root.polarCoverageLimited = fullBounds !== null && (fullBounds.topLeft.latitude > 85.05112878 || fullBounds.bottomRight.latitude < -85.05112878)
+            if (bounds && bounds.topLeft.latitude <= 85.05112878 && bounds.bottomRight.latitude >= -85.05112878) {
                 if (!root.fitViewport(bounds)) return
                 root.areaBounds = bounds
                 root.fittedZone = selector.selectedTimeZone
@@ -205,7 +251,7 @@ Item {
             }
             // Wait for geometry that KDE says is available. Unknown/unmapped
             // zones keep the existing coordinate fallback rather than faking an area.
-            if (!bounds && selector.availableMapTimeZones.includes(selector.selectedTimeZone) && ++root.centerAttempts < 180) return
+            if (!fullBounds && selector.availableMapTimeZones.includes(selector.selectedTimeZone) && ++root.centerAttempts < 180) return
             stop()
             root.fittedZone = selector.selectedTimeZone
             if (!root.center || root.center.length !== 2) return
@@ -216,6 +262,8 @@ Item {
         }
     }
     onCenterChanged: requestCenter()
+    onInitialBoundsChanged: if (!zone.length) requestCenter()
+    onInitialZonesChanged: if (!zone.length) requestCenter()
     onWidthChanged: requestCenter()
     onHeightChanged: requestCenter()
     onZoneChanged: {

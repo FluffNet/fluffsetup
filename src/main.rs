@@ -7,6 +7,7 @@
 mod backend;
 mod clock;
 mod country;
+mod handoff;
 mod i18n;
 mod keyboard;
 mod keyboard_names;
@@ -86,7 +87,7 @@ impl SetupProgress {
         // A saved page number cannot certify successful finalization. Only
         // this process's completion result may unlock the Finish action.
         if self.page == 5 {
-            return if timezone::valid(&self.timezone) {
+            return if timezone::selectable(&self.timezone) {
                 3
             } else {
                 9
@@ -155,13 +156,17 @@ fn parse_setup_progress(contents: &str) -> SetupProgress {
     };
     let stored_confirmed = values.next() == Some("true");
     let region_confirmed = !region.is_empty() && stored_confirmed;
-    let stored_timezone = values.next().unwrap_or_default();
-    let timezone = if version == Some("v6") && timezone::valid(stored_timezone) {
+    let stored_timezone = timezone::choice_id(values.next().unwrap_or_default());
+    let stored_timezone_customized = values.next() == Some("true");
+    let timezone = if version == Some("v6")
+        && timezone::selectable(stored_timezone)
+        && (stored_timezone != "UTC" || stored_timezone_customized)
+    {
         stored_timezone.into()
     } else {
         String::new()
     };
-    let timezone_customized = values.next() == Some("true") && !timezone.is_empty();
+    let timezone_customized = stored_timezone_customized && !timezone.is_empty();
     let page = if page == 3 && timezone.is_empty() {
         9
     } else {
@@ -223,6 +228,7 @@ pub(crate) fn save_setup_progress(progress: &SetupProgress) -> io::Result<()> {
 unsafe extern "C" {
     fn fluffsetup_bind_setup_window();
     fn fluffsetup_initialize_session_background();
+    fn fluffsetup_release_session_background();
 }
 
 const HOSTNAME_REQUIREMENTS: &str = "System Name Requirements:
@@ -418,7 +424,7 @@ fn remove_temporary_setup() -> Result<(), String> {
     Ok(())
 }
 
-fn run_prepare_summary() -> ! {
+fn run_prepare_summary(controller: u32) -> ! {
     if !is_root() {
         eprintln!("Preparing the completed setup summary must be run as root.");
         std::process::exit(1);
@@ -426,7 +432,7 @@ fn run_prepare_summary() -> ! {
 
     // The GUI only shows its success summary after this removal completes.
     // Linux keeps the running executable mapped until it exits.
-    if let Err(error) = remove_temporary_setup() {
+    if let Err(error) = handoff::finalize(controller, remove_temporary_setup) {
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -440,7 +446,7 @@ fn run_cleanup() -> ! {
     }
 
     let sessions = temporary_login_sessions();
-    if let Err(error) = remove_temporary_setup() {
+    if let Err(error) = handoff::finalize(std::process::id(), remove_temporary_setup) {
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -1226,7 +1232,7 @@ fn parse_setup_payload(input: &str) -> Result<[&str; 8], &'static str> {
     Ok(fields.map(|value| value.trim_end_matches('\r')))
 }
 
-fn run_gui_apply() {
+fn run_gui_apply(controller: u32) {
     let mut input = String::new();
     io::stdin()
         .read_to_string(&mut input)
@@ -1265,7 +1271,7 @@ fn run_gui_apply() {
     }
     keyboard::validate_selection(keyboards, keyboard::catalog())
         .unwrap_or_else(|error| exit_with_error(&error));
-    if !timezone::valid(timezone) {
+    if !timezone::selectable(timezone) {
         exit_with_error("Invalid or unavailable timezone.");
     }
     apply_gui_settings(SetupRequest {
@@ -1287,7 +1293,7 @@ fn run_gui_apply() {
     let executable = executable
         .to_str()
         .unwrap_or_else(|| exit_with_error("FluffSetup's executable path is not valid UTF-8."));
-    run_sudo(executable, &["--prepare-summary"]);
+    run_sudo(executable, &["--prepare-summary", &controller.to_string()]);
 }
 
 fn launch_gui() {
@@ -1329,8 +1335,26 @@ fn launch_gui() {
             fluffsetup_bind_setup_window();
         }
     }
+    run_gui_event_loop(app, engine, !preview_mode());
+}
+
+fn run_gui_event_loop(
+    mut app: cxx::UniquePtr<QGuiApplication>,
+    engine: cxx::UniquePtr<QQmlApplicationEngine>,
+    native_background: bool,
+) {
     if let Some(app) = app.as_mut() {
         app.exec();
+    }
+    // QML windows must go first, then the native wallpaper backing stores,
+    // while QGuiApplication still owns the live Wayland connection.
+    drop(engine);
+    if native_background {
+        unsafe {
+            // SAFETY: this releases the GUI-thread resources created above,
+            // before the application/platform connection is destroyed.
+            fluffsetup_release_session_background();
+        }
     }
 }
 
@@ -1349,6 +1373,15 @@ fn preview_argument(name: &str) -> Option<String> {
 fn main() {
     if preview_mode() {
         launch_gui();
+    } else if env::args().nth(1).as_deref() == Some("--plm-handoff") {
+        if !is_root() {
+            eprintln!("The PLM handoff worker must run as root.");
+            std::process::exit(1);
+        }
+        if let Err(error) = handoff::run_worker(&env::args().skip(2).collect::<Vec<_>>()) {
+            eprintln!("PLM handoff failed: {error}");
+            std::process::exit(1);
+        }
     } else if env::args().any(|argument| argument == "--apply-keyboard") {
         let arguments: Vec<_> = env::args().collect();
         if arguments.len() != 4 || arguments[1] != "--apply-keyboard" {
@@ -1385,16 +1418,27 @@ fn main() {
     } else if env::args().any(|argument| argument == "--cleanup") {
         run_cleanup();
     } else if env::args().any(|argument| argument == "--prepare-summary") {
-        run_prepare_summary();
+        run_prepare_summary(controller_argument());
     } else if env::args().any(|argument| argument == "--disable-autostart") {
         run_disable_autostart();
     } else if env::args().any(|argument| argument == "--apply-setup") {
-        run_gui_apply();
+        run_gui_apply(controller_argument());
     } else if env::args().any(|argument| argument == "--terminal") {
         run_setup();
     } else {
         launch_gui();
     }
+}
+
+fn controller_argument() -> u32 {
+    let arguments = env::args().collect::<Vec<_>>();
+    if arguments.len() == 3
+        && let Ok(pid) = arguments[2].parse::<u32>()
+        && pid > 0
+    {
+        return pid;
+    }
+    exit_with_error("Invalid setup Finish process identity.")
 }
 
 #[cfg(test)]
@@ -1407,6 +1451,34 @@ mod tests {
         username_base_from_display_name, validate_display_name, validate_hostname,
         validate_username, without_autologin_section,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "creates temporary wallpaper/setup windows on a disposable native Wayland display"]
+    fn wallpaper_shutdown_releases_windows_before_the_wayland_connection() {
+        assert_eq!(
+            std::env::var("FLUFFSETUP_NATIVE_SHUTDOWN_TEST").as_deref(),
+            Ok("1")
+        );
+        let app = super::QGuiApplication::new();
+        let mut engine = super::QQmlApplicationEngine::new();
+        unsafe {
+            // SAFETY: this test owns the live application on this GUI thread.
+            super::fluffsetup_initialize_session_background();
+        }
+        engine.as_mut().unwrap().load_data(
+            &cxx_qt_lib::QByteArray::from(
+                &b"import QtQuick\nWindow { visible: true; title: \"Fluff Linux Setup\"; width: 320; height: 200; Timer { interval: 500; running: true; onTriggered: Qt.quit() } }"[..],
+            ),
+            &super::QUrl::default(),
+        );
+        unsafe {
+            // SAFETY: the engine has created the setup window on this thread.
+            super::fluffsetup_bind_setup_window();
+        }
+        // Exercise the exact production event loop and teardown sequence.
+        super::run_gui_event_loop(app, engine, true);
+    }
 
     #[test]
     fn recovery_requires_a_confirmed_region_and_never_unlocks_finish() {
@@ -1708,7 +1780,14 @@ mod tests {
             parse_setup_progress(&serialize_setup_progress(&state)),
             state
         );
-        for id in ["", "../etc/passwd", "Asia/Unavailable"] {
+        for id in [
+            "",
+            "../etc/passwd",
+            "Asia/Unavailable",
+            "UTC",
+            "Etc/UTC",
+            "GMT",
+        ] {
             let invalid = SetupProgress {
                 page: 3,
                 timezone: id.into(),
@@ -1728,7 +1807,7 @@ mod tests {
         let corrupt = parse_setup_progress(
             "9\nfluff-pc\nUser\nuser\nfalse\nhe\nv6\nus;bad\ntrue\nXX\ntrue\nUTC",
         );
-        assert_eq!(corrupt.timezone, "UTC");
+        assert!(corrupt.timezone.is_empty());
         assert!(corrupt.region.is_empty() && corrupt.keyboards.is_empty());
         for customized in [false, true] {
             let selection = SetupProgress {
@@ -1738,6 +1817,39 @@ mod tests {
             let restored = parse_setup_progress(&serialize_setup_progress(&selection));
             assert_eq!(restored.timezone_customized, customized);
             assert_eq!(restored.timezone, "Europe/Brussels");
+        }
+        let manual_utc = SetupProgress {
+            page: 3,
+            timezone: "UTC".into(),
+            timezone_customized: true,
+            ..state.clone()
+        };
+        assert_eq!(
+            parse_setup_progress(&serialize_setup_progress(&manual_utc)),
+            manual_utc
+        );
+        let old_automatic_utc = SetupProgress {
+            timezone_customized: false,
+            ..manual_utc
+        };
+        let restored = parse_setup_progress(&serialize_setup_progress(&old_automatic_utc));
+        assert_eq!(restored.page, 9);
+        assert!(restored.timezone.is_empty() && !restored.timezone_customized);
+        for id in ["Asia/Gaza", "Asia/Hebron"] {
+            for customized in [false, true] {
+                let old_choice = SetupProgress {
+                    page: 3,
+                    timezone: id.into(),
+                    timezone_customized: customized,
+                    ..state.clone()
+                };
+                let restored = parse_setup_progress(&serialize_setup_progress(&old_choice));
+                assert_eq!(restored.timezone, "Asia/Jerusalem");
+                assert_eq!(restored.timezone_customized, customized);
+                assert_eq!(restored.page, 3);
+                assert_eq!(restored.region, old_choice.region);
+                assert_eq!(restored.language, old_choice.language);
+            }
         }
     }
 
@@ -1838,7 +1950,7 @@ mod tests {
                 let progress = SetupProgress {
                     page,
                     language: language.to_string(),
-                    timezone: "UTC".into(),
+                    timezone: "Asia/Jerusalem".into(),
                     ..SetupProgress::default()
                 };
                 assert_eq!(

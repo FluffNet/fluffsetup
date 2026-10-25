@@ -377,3 +377,7 @@ extern "C" void fluffsetup_bind_setup_window() {
         wallpaperManager->bindSetupWindow();
     }
 }
+
+extern "C" void fluffsetup_release_session_background() {
+    wallpaperManager.reset();
+}

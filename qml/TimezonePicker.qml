@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtPositioning
 
 Item {
     id: root
     property var zones: []
     property string selectedCode: "UTC"
     property string language: "en"
+    property string region: ""
     property bool rtl: false
     property real uiScale: 1
     property bool mapEnabled: Qt.platform.os !== "osx"
@@ -18,15 +20,45 @@ Item {
     property alias searchInput: search
     property alias searchText: search.text
     property alias resultView: results
+    readonly property real resultsGutter: results.verticalScrollBar.width + Math.round(8 * uiScale)
     readonly property var mapItem: mapLoader.item
+    readonly property var initialMapZones: zones.filter(zone => zone.suggested).map(zone => zone.code)
+    // Give large regions a useful initial view instead of averaging distant
+    // territories. Any selected timezone takes precedence over this framing.
+    readonly property var initialMapBounds: {
+        if (selectedCode.length) return null
+        if (region === "US")
+            return QtPositioning.rectangle(QtPositioning.coordinate(50, -125), QtPositioning.coordinate(24, -66))
+        // Mainland, Torres Strait islands, Tasmania and Lord Howe. Macquarie
+        // remains in the list and fits independently when chosen.
+        if (region === "AU")
+            return QtPositioning.rectangle(QtPositioning.coordinate(-9, 112), QtPositioning.coordinate(-44.5, 160))
+        // Include the main and southern islands plus Chatham across the date
+        // line, rather than centering an arithmetic longitude average at 0.
+        if (region === "NZ")
+            return QtPositioning.rectangle(QtPositioning.coordinate(-33, 165), QtPositioning.coordinate(-53.5, -175))
+        if (region === "ID")
+            return QtPositioning.rectangle(QtPositioning.coordinate(7, 94), QtPositioning.coordinate(-12, 142))
+        // Mainland and Easter Island; the selected Punta Arenas area can
+        // still fit its detached Antarctic territory independently.
+        if (region === "CL")
+            return QtPositioning.rectangle(QtPositioning.coordinate(-17, -111), QtPositioning.coordinate(-57, -66))
+        return null
+    }
     readonly property var selectedCenter: {
         const selected = zones.find(zone => zone.code === selectedCode)
         if (selected && selected.center) return selected.center
         if (selectedCode.length) return null
         const suggested = zones.filter(zone => zone.suggested && zone.center)
         if (!suggested.length) return null
-        return [suggested.reduce((sum, zone) => sum + zone.center[0], 0) / suggested.length,
-                suggested.reduce((sum, zone) => sum + zone.center[1], 0) / suggested.length]
+        // Longitudes wrap at the date line. A circular mean keeps nearby
+        // islands at +179/-179 together instead of placing them near 0.
+        const radians = Math.PI / 180
+        const east = suggested.reduce((sum, zone) => sum + Math.sin(zone.center[1] * radians), 0)
+        const north = suggested.reduce((sum, zone) => sum + Math.cos(zone.center[1] * radians), 0)
+        const longitude = Math.hypot(east, north) > 0.000001
+            ? Math.atan2(east, north) / radians : suggested[0].center[1]
+        return [suggested.reduce((sum, zone) => sum + zone.center[0], 0) / suggested.length, longitude]
     }
     readonly property real minimumResultsHeight: 5 * Math.round(44 * uiScale) + 4 * Math.round(4 * uiScale)
     readonly property string selectedLabel: {
@@ -35,12 +67,9 @@ Item {
     }
     readonly property var filteredZones: {
         const tokens = searchKey(search.text).trim().split(/\s+/).filter(token => token.length)
-        if (!tokens.length) {
-            const suggested = zones.filter(zone => zone.suggested)
-            if (!suggested.length) return zones
-            const selected = zones.find(zone => zone.code === selectedCode)
-            return selected && !selected.suggested ? [selected, ...suggested] : suggested
-        }
+        // Rust supplies regional suggestions first, then every other timezone
+        // alphabetically by its localized label. Keep that complete ordering.
+        if (!tokens.length) return zones
         return zones.filter(zone => tokens.every(token => searchKey(zone.search || zone.label + " " + zone.code).includes(token)))
     }
     readonly property string confirmationCode: {
@@ -99,6 +128,8 @@ Item {
                         zone: Qt.binding(() => root.selectedCode),
                         language: Qt.binding(() => root.language),
                         center: Qt.binding(() => root.selectedCenter),
+                        initialBounds: Qt.binding(() => root.initialMapBounds),
+                        initialZones: Qt.binding(() => root.initialMapZones),
                         preferredZoom: Qt.binding(() => root.selectedCode.length ? 4 : 2),
                         mapText: Qt.binding(() => root.mapText)
                     })
@@ -172,31 +203,53 @@ Item {
                 border.width: search.activeFocus ? 2 : 1
             }
         }
-        LanguagePicker {
-            id: results
-            objectName: "timezone-results"
+        Item {
+            id: resultsFrame
+            objectName: "timezone-results-frame"
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: root.minimumResultsHeight
-            languages: root.filteredZones
-            selectedCode: root.selectedCode
-            allowUnselectedContinue: root.canConfirm
-            labelLanguage: root.language
-            rtl: root.rtl
-            uiScale: root.uiScale
-            onLanguageSelected: id => root.zoneSelected(id)
-            onContinueRequested: root.confirm()
-            Text {
+            LayoutMirroring.enabled: false
+            LanguagePicker {
+                id: results
+                objectName: "timezone-results"
                 anchors.fill: parent
-                anchors.rightMargin: results.rightMargin
-                anchors.leftMargin: results.leftMargin
-                visible: results.count === 0
-                text: root.emptyText
-                wrapMode: Text.Wrap
-                font.pixelSize: Math.round(15 * root.uiScale)
-                color: "#55565a"
-                horizontalAlignment: root.rtl ? Text.AlignRight : Text.AlignLeft
-                LayoutMirroring.enabled: false
+                anchors.leftMargin: root.rtl ? root.resultsGutter : 0
+                anchors.rightMargin: root.rtl ? 0 : root.resultsGutter
+                // Keep the scrollbar outside the clipped row viewport. Native
+                // left/right Flickable margins are not needed in this frame.
+                leftMargin: 0
+                rightMargin: 0
+                languages: root.filteredZones
+                selectedCode: root.selectedCode
+                allowUnselectedContinue: root.canConfirm
+                labelLanguage: root.language
+                rtl: root.rtl
+                uiScale: root.uiScale
+                verticalScrollBar.parent: resultsFrame
+                verticalScrollBar.policy: ScrollBar.AsNeeded
+                verticalScrollBar.visible: count > 0 && contentHeight > height + 1
+                verticalScrollBar.padding: 2
+                verticalScrollBar.minimumSize: Math.min(1, Math.round(24 * root.uiScale) / Math.max(1, height))
+                verticalScrollBar.contentItem: Rectangle {
+                    implicitWidth: 6
+                    radius: width / 2
+                    color: results.verticalScrollBar.pressed ? "#6b6e74"
+                           : results.verticalScrollBar.hovered ? "#82858d" : "#a7a9ad"
+                }
+                verticalScrollBar.background: Item {}
+                onLanguageSelected: id => root.zoneSelected(id)
+                onContinueRequested: root.confirm()
+                Text {
+                    anchors.fill: parent
+                    visible: results.count === 0
+                    text: root.emptyText
+                    wrapMode: Text.Wrap
+                    font.pixelSize: Math.round(15 * root.uiScale)
+                    color: "#55565a"
+                    horizontalAlignment: root.rtl ? Text.AlignRight : Text.AlignLeft
+                    LayoutMirroring.enabled: false
+                }
             }
         }
     }

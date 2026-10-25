@@ -11,6 +11,7 @@ ListView {
     property bool grouped: false
     property string labelLanguage: ""
     property bool allowUnselectedContinue: false
+    property alias verticalScrollBar: scrollBar
     readonly property int selectedIndex: languages.findIndex(language => language.code === selectedCode)
     readonly property bool hasSelection: selectedIndex >= 0
     function cycleKey(value) {
@@ -176,9 +177,13 @@ ListView {
         // A separate parent disables the attached control's automatic geometry
         // so switching RTL/LTR cannot overwrite the left/right placement.
         parent: scrollBarContainer
+        // Keep the existing persistent thumb when scrolling is possible.
         policy: ScrollBar.AlwaysOn
+        // Keep the gutter stable, but show the control only for real overflow.
+        // The one-pixel tolerance avoids a bar caused by layout rounding.
+        visible: picker.count > 0 && picker.contentHeight > picker.height + 1
         width: Math.max(8, Math.round(12 * picker.uiScale))
-        x: picker.rtl ? 0 : picker.width - width
+        x: picker.rtl ? 0 : parent.width - width
         anchors.top: parent.top
         anchors.bottom: parent.bottom
     }

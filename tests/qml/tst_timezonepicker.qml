@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtTest
+import QtPositioning
 import "../../qml"
 
 Item {
@@ -40,11 +41,138 @@ Item {
             surface.rejectSelection = false
             picker.searchText = ""
             picker.selectedCode = "Asia/Jerusalem"
+            picker.region = ""
             picker.rtl = false
             picker.uiScale = 1
             selection.clear()
             continuation.clear()
             picker.focusSearch()
+        }
+        function test_us_initial_view_keeps_all_timezone_choices() {
+            const original = picker.zones
+            picker.zones = [
+                {code:"America/New_York",label:"New York",suggested:true,center:[40.7142,-74.0064]},
+                {code:"America/Anchorage",label:"Anchorage",suggested:true,center:[61.2181,-149.9003]},
+                {code:"Pacific/Honolulu",label:"Honolulu",suggested:true,center:[21.3069,-157.8583]}
+            ]
+            picker.region = "US"
+            picker.selectedCode = ""
+            verify(picker.initialMapBounds && picker.initialMapBounds.isValid)
+            compare(picker.initialMapBounds.topLeft.latitude,50)
+            compare(picker.initialMapBounds.bottomRight.longitude,-66)
+            compare(picker.filteredZones.length,3)
+            for (const code of ["America/New_York","America/Anchorage","Pacific/Honolulu"]) {
+                picker.selectedCode = code
+                compare(picker.initialMapBounds,null)
+                compare(picker.selectedCenter,picker.zones.find(row => row.code === code).center)
+            }
+            picker.selectedCode = ""
+            picker.region = "RU"
+            compare(picker.initialMapBounds,null)
+            picker.zones = original
+        }
+        function test_australia_initial_view_keeps_distant_island_choices() {
+            const original = picker.zones
+            picker.zones = [
+                {code:"Australia/Perth",label:"Perth",suggested:true,center:[-31.95,115.85]},
+                {code:"Australia/Hobart",label:"Hobart",suggested:true,center:[-42.8833,147.3167]},
+                {code:"Australia/Lord_Howe",label:"Lord Howe",suggested:true,center:[-31.55,159.0833]},
+                {code:"Antarctica/Macquarie",label:"Macquarie",suggested:true,center:[-54.5,158.95]}
+            ]
+            picker.region = "AU"
+            picker.selectedCode = ""
+            verify(picker.initialMapBounds && picker.initialMapBounds.isValid)
+            compare(picker.initialMapBounds.topLeft.latitude,-9)
+            compare(picker.initialMapBounds.topLeft.longitude,112)
+            compare(picker.initialMapBounds.bottomRight.latitude,-44.5)
+            compare(picker.initialMapBounds.bottomRight.longitude,160)
+            compare(picker.filteredZones.length,4)
+            verify(!picker.canConfirm)
+            for (const zone of picker.zones) {
+                picker.selectedCode = zone.code
+                compare(picker.initialMapBounds,null)
+                compare(picker.selectedCenter,zone.center)
+            }
+            picker.zones = original
+        }
+        function test_dateline_initial_center_and_new_zealand_bounds() {
+            const original = picker.zones
+            picker.zones = [
+                {code:"Pacific/Auckland",label:"Auckland",suggested:true,center:[-36.8667,174.7667]},
+                {code:"Pacific/Chatham",label:"Chatham",suggested:true,center:[-43.95,-176.55]}
+            ]
+            picker.region = "NZ"
+            picker.selectedCode = ""
+            verify(Math.abs(picker.selectedCenter[1]) > 175,"Dateline islands were centered on the opposite side of the world")
+            verify(picker.initialMapBounds && picker.initialMapBounds.isValid)
+            verify(picker.initialMapBounds.topLeft.longitude > picker.initialMapBounds.bottomRight.longitude)
+            for (const zone of picker.zones) {
+                verify(picker.initialMapBounds.contains(QtPositioning.coordinate(...zone.center)))
+                picker.selectedCode = zone.code
+                compare(picker.initialMapBounds,null)
+                compare(picker.selectedCenter,zone.center)
+                picker.selectedCode = ""
+            }
+            // The generic fallback must also wrap correctly outside the
+            // explicitly framed region, and ignore unsuggested catalog rows.
+            picker.region = "KI"
+            compare(picker.initialMapBounds,null)
+            picker.zones = picker.zones.concat({code:"Europe/London",label:"London",center:[51.5,0]})
+            verify(Math.abs(picker.selectedCenter[1]) > 175)
+            picker.zones = [
+                {code:"east",suggested:true,center:[0,90]},
+                {code:"west",suggested:true,center:[0,-90]}
+            ]
+            compare(picker.selectedCenter[1],90) // Deterministic antipodal fallback.
+            picker.zones = original
+        }
+        function test_archipelago_and_chile_initial_bounds_data() {
+            return [
+                {tag:"Indonesia",region:"ID",zones:[
+                    {code:"Asia/Jakarta",center:[-6.1667,106.8]},
+                    {code:"Asia/Pontianak",center:[-0.0333,109.3333]},
+                    {code:"Asia/Makassar",center:[-5.1167,119.4]},
+                    {code:"Asia/Jayapura",center:[-2.5333,140.7]}
+                ]},
+                {tag:"Chile",region:"CL",zones:[
+                    {code:"America/Santiago",center:[-33.45,-70.6667]},
+                    {code:"America/Coyhaique",center:[-45.5667,-72.0667]},
+                    {code:"America/Punta_Arenas",center:[-53.15,-70.9167]},
+                    {code:"Pacific/Easter",center:[-27.15,-109.4333]}
+                ]}
+            ]
+        }
+        function test_archipelago_and_chile_initial_bounds(data) {
+            const original = picker.zones
+            picker.zones = data.zones.map(zone => Object.assign({suggested:true,label:zone.code},zone))
+            picker.region = data.region
+            picker.selectedCode = ""
+            verify(picker.initialMapBounds && picker.initialMapBounds.isValid)
+            verify(!picker.canConfirm)
+            for (const zone of picker.zones) {
+                verify(picker.initialMapBounds.contains(QtPositioning.coordinate(...zone.center)))
+                picker.selectedCode = zone.code
+                compare(picker.initialMapBounds,null)
+                compare(picker.selectedCenter,zone.center)
+                picker.selectedCode = ""
+            }
+            picker.zones = original
+        }
+        function test_regional_overview_ids_ignore_global_choices_and_search() {
+            const original = picker.zones
+            picker.zones = [
+                {code:"Europe/Lisbon",label:"Lisbon",suggested:true},
+                {code:"Atlantic/Azores",label:"Azores",suggested:true},
+                {code:"Atlantic/Madeira",label:"Madeira",suggested:true},
+                {code:"Europe/London",label:"London"},
+                {code:"UTC",label:"UTC"}
+            ]
+            compare(picker.initialMapZones,["Europe/Lisbon","Atlantic/Azores","Atlantic/Madeira"])
+            picker.searchText = "London"
+            compare(picker.initialMapZones,["Europe/Lisbon","Atlantic/Azores","Atlantic/Madeira"])
+            picker.selectedCode = "Europe/London"
+            compare(picker.initialMapZones,["Europe/Lisbon","Atlantic/Azores","Atlantic/Madeira"])
+            picker.zones = original
         }
         function test_confirmation_paths_data() {
             const cases = [
@@ -192,6 +320,33 @@ Item {
             compare(continuation.count, 0)
             compare(picker.selectedCode, "Asia/Jerusalem")
         }
+        function test_utc_search_and_confirmation_data() {
+            return [{tag:"LTR", rtl:false}, {tag:"RTL", rtl:true}]
+        }
+        function test_utc_search_and_confirmation(data) {
+            const original = picker.zones
+            picker.rtl = data.rtl
+            picker.zones = original.concat([{code:"UTC", label:"UTC", english:"UTC", search:"UTC", suggested:false}])
+            for (const action of ["next", "return", "enter"]) {
+                picker.selectedCode = "Asia/Jerusalem"
+                picker.searchText = action === "return" ? "utc" : "UTC"
+                compare(picker.filteredZones.length, 1)
+                compare(picker.filteredZones[0].code, "UTC")
+                compare(picker.selectedCode, "Asia/Jerusalem")
+                continuation.clear()
+                if (action === "next") mouseClick(nextButton)
+                else {
+                    picker.focusSearch()
+                    keyClick(action === "return" ? Qt.Key_Return : Qt.Key_Enter)
+                }
+                compare(picker.selectedCode, "UTC")
+                compare(continuation.count, 1)
+                picker.searchText = ""
+                compare(picker.filteredZones[picker.filteredZones.length - 1].code, "UTC")
+                compare(picker.selectedCode, "UTC")
+            }
+            picker.zones = original
+        }
         function test_enter_and_numpad_enter() {
             for (let key of [Qt.Key_Return, Qt.Key_Enter]) {
                 picker.searchText = "London"
@@ -257,14 +412,81 @@ Item {
         function test_region_suggestions_and_global_search() {
             const original = picker.zones
             picker.zones = original.map(zone => Object.assign({}, zone, {suggested: zone.code === "Asia/Jerusalem"}))
-            compare(picker.filteredZones.length, 1)
+            compare(picker.filteredZones.length, original.length)
+            compare(picker.filteredZones.map(zone => zone.code).join(","), original.map(zone => zone.code).join(","))
             picker.searchText = "London"
             compare(picker.filteredZones.length, 1)
             compare(picker.filteredZones[0].code, "Europe/London")
             picker.selectedCode = "Europe/London"
             picker.searchText = ""
-            compare(picker.filteredZones.length, 2)
-            compare(picker.filteredZones[0].code, "Europe/London")
+            compare(picker.filteredZones.length, original.length)
+            compare(picker.filteredZones[0].code, "Asia/Jerusalem")
+            compare(picker.filteredZones.filter(zone => zone.code === "Europe/London").length, 1)
+            compare(picker.selectedCode, "Europe/London")
+            picker.zones = original
+        }
+        function test_scrollbar_gutter_and_visibility_data() {
+            const rows = []
+            for (const rtl of [false, true]) for (const scale of [1, 0.55])
+                rows.push({tag: (rtl ? "RTL" : "LTR") + "-" + scale, rtl, scale})
+            return rows
+        }
+        function test_scrollbar_gutter_and_visibility(data) {
+            const original = picker.zones
+            picker.rtl = data.rtl
+            picker.uiScale = data.scale
+            const view = picker.resultView
+            const bar = view.verticalScrollBar
+            const frame = findChild(picker, "timezone-results-frame")
+            compare(bar.parent, frame)
+            compare(bar.policy, ScrollBar.AsNeeded)
+            tryCompare(bar, "visible", false) // Four rows already fit.
+            picker.searchText = "zzzz"
+            tryCompare(view, "count", 0)
+            tryCompare(bar, "visible", false)
+            picker.searchText = "London"
+            tryCompare(view, "count", 1)
+            tryCompare(bar, "visible", false)
+            picker.searchText = ""
+            picker.zones = Array.from({length: 30}, (_, index) => ({
+                code: "zone-" + index, label: "Timezone " + index, english: "Timezone " + index,
+                suggested: index === 0
+            }))
+            tryCompare(view, "count", 30)
+            tryCompare(bar, "visible", true)
+            view.positionViewAtBeginning()
+            view.forceLayout()
+            const row = view.itemAtIndex(0)
+            verify(row)
+            const rowPosition = row.mapToItem(frame, 0, 0)
+            if (data.rtl) {
+                compare(bar.x, 0)
+                verify(rowPosition.x >= bar.x + bar.width + Math.round(8 * data.scale) - 1)
+                verify(Math.abs(rowPosition.x + row.width - frame.width) <= 1)
+            } else {
+                compare(bar.x + bar.width, frame.width)
+                verify(rowPosition.x + row.width <= bar.x - Math.round(8 * data.scale) + 1)
+                verify(Math.abs(rowPosition.x) <= 1)
+            }
+            verify(bar.x >= 0 && bar.x + bar.width <= frame.width + 1)
+            const initialX = view.contentX
+            mouseDrag(bar, bar.width / 2, bar.height * 0.15, 0, bar.height * 0.5)
+            tryVerify(() => view.contentY > 0)
+            compare(view.contentX, initialX)
+            picker.zones = original
+        }
+        function test_empty_search_restores_all_rows_after_search_or_manual_selection() {
+            const original = picker.zones
+            picker.zones = original.map(zone => Object.assign({}, zone, {suggested: zone.code === "Asia/Jerusalem"}))
+            for (const query of ["", "   ", "London", "zzzz", ""]) {
+                picker.searchText = query
+                if (query.trim().length === 0) compare(picker.filteredZones.length, original.length)
+            }
+            picker.selectedCode = "Europe/Paris"
+            picker.searchText = ""
+            compare(picker.filteredZones[0].code, "Asia/Jerusalem")
+            compare(picker.filteredZones[3].code, "Europe/Paris")
+            compare(picker.filteredZones.length, original.length)
             picker.zones = original
         }
         function test_touch_and_wheel_scroll_results_without_horizontal_drift() {

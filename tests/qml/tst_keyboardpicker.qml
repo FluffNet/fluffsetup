@@ -6,6 +6,7 @@ import "../../qml"
 Item {
     id: testSurface
     property var originalLayouts
+    property var originalLabels
     width: 600
     height: 600
     KeyboardPicker {
@@ -52,9 +53,13 @@ Item {
     TestCase {
         name: "KeyboardPicker"
         when: windowShown
-        function initTestCase() { originalLayouts = picker.layouts }
+        function initTestCase() {
+            originalLayouts = picker.layouts
+            originalLabels = picker.labels
+        }
         function init() {
             picker.layouts = originalLayouts
+            picker.labels = originalLabels
             testSurface.width = 600
             testSurface.height = 600
             picker.visible = true
@@ -105,11 +110,84 @@ Item {
             tryCompare(picker, "hasSuggestions", false)
             compare(picker.filteredLayouts[0].id, "fr")
         }
+        function test_scrollbar_only_for_overflow_data() {
+            const rows = []
+            for (const rtl of [false,true]) for (const scale of [1,0.65])
+                rows.push({tag:(rtl?"RTL":"LTR")+"-"+scale,rtl,scale})
+            return rows
+        }
+        function test_scrollbar_only_for_overflow(data) {
+            picker.rtl = data.rtl
+            picker.uiScale = data.scale
+            const view = picker.resultsView
+            const bar = findChild(picker,"keyboardResultsScrollBar")
+            verify(bar)
+            tryCompare(bar,"visible",false)
+            const left = view.leftMargin, right = view.rightMargin
+            picker.searchText = "zzzz"
+            tryCompare(view,"count",0)
+            tryCompare(bar,"visible",false)
+            picker.searchText = "German"
+            tryCompare(view,"count",1)
+            tryCompare(bar,"visible",false)
+            picker.searchText = ""
+            picker.layouts = originalLayouts.concat(Array.from({length:50},(_,index) => ({
+                id:"extra-"+index,name:"Extra layout "+index
+            })))
+            tryCompare(bar,"visible",true)
+            wait(800)
+            verify(bar.contentItem.opacity > 0,"An overflowing list's thumb faded away")
+            compare(view.leftMargin,left)
+            compare(view.rightMargin,right)
+            const before = view.contentY
+            mouseWheel(view,view.width/2,view.height/2,0,-240)
+            tryVerify(() => view.contentY > before+10)
+            wait(350)
+            picker.searchText = "German"
+            tryCompare(view,"count",1)
+            tryCompare(bar,"visible",false)
+            picker.searchText = "zzzz"
+            tryCompare(view,"count",0)
+            tryCompare(bar,"visible",false)
+        }
         function test_search(data) {
             picker.searchText = data.query
             wait(30)
             compare(picker.filteredLayouts.length, data.expected.length ? 1 : 0)
             if (data.expected.length) compare(picker.filteredLayouts[0].id, data.expected)
+        }
+        function test_search_placeholder_without_hover_tooltip_data() {
+            const languages = [
+                {tag: "English", rtl: false, text: "Search keyboard layouts or use search bar to test keyboard layout"},
+                {tag: "Hebrew", rtl: true, text: "חיפוש פריסות מקלדת או שימוש בשורת החיפוש לבדיקת פריסת המקלדת"}
+            ]
+            const rows = []
+            for (const language of languages) for (const scale of [1, 0.65])
+                rows.push({tag: language.tag + "-" + scale, rtl: language.rtl,
+                           text: language.text, scale: scale})
+            return rows
+        }
+        function test_search_placeholder_without_hover_tooltip(data) {
+            picker.rtl = data.rtl
+            picker.uiScale = data.scale
+            picker.labels = Object.assign({}, originalLabels, {search: data.text})
+            const field = picker.searchInput
+            const placeholder = findChild(picker, "keyboard-search-placeholder")
+            verify(placeholder)
+            compare(field.placeholderText, data.text)
+            compare(placeholder.text, data.text)
+            compare(placeholder.visible, true)
+            mouseMove(field, field.width / 2, field.height / 2)
+            tryCompare(field, "hovered", true)
+            wait(800)
+            compare(field.ToolTip.visible, false)
+            compare(field.ToolTip.text, "")
+            picker.searchText = "French"
+            tryCompare(placeholder, "visible", false)
+            wait(800)
+            compare(field.ToolTip.visible, false)
+            compare(picker.filteredLayouts.length, 1)
+            compare(picker.filteredLayouts[0].id, "fr")
         }
         function test_enter_data() {
             return [{tag: "regular", key: Qt.Key_Return}, {tag: "numpad", key: Qt.Key_Enter}]
