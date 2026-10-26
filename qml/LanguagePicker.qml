@@ -99,7 +99,9 @@ ListView {
         const current = matches.indexOf(currentIndex)
         choose(matches[(current + 1) % matches.length])
     }
-    onSelectedCodeChanged: syncSelection()
+    // The selected code's handler can run before selectedIndex's binding
+    // updates. Reveal the row only after its calculated index is current.
+    onSelectedIndexChanged: syncSelection()
     onLanguagesChanged: syncSelection()
     onCountChanged: syncSelection()
     Component.onCompleted: syncSelection()
