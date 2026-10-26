@@ -319,10 +319,14 @@ fn refresh_with(
     // Explicitly load the finalized system language AND regional categories.
     // Merely restarting a greeter under the old daemon inherits stale LC_TIME.
     write_locale()?;
-    run("/usr/bin/systemctl", &["daemon-reload"])?;
-    // Finish can race PLM starting its old greeter. Stop the daemon first so
-    // it cannot create more sessions while we retire that greeter and its VT.
-    run("/usr/bin/systemctl", &["stop", "plasmalogin.service"])?;
+    // Finish can race PLM starting its old greeter. Queue shutdown first, then
+    // retire the greeter immediately: a blocking stop can wait several seconds
+    // for its helper while the old password prompt is still accepting input.
+    run(
+        "/usr/bin/systemctl",
+        &["stop", "--no-block", "plasmalogin.service"],
+    )?;
+    terminate_user_sessions(greeter_uid, &mut run)?;
     if session_rows(&sessions).any(|(id, uid)| id == session.id && uid == session.uid) {
         session_command(
             &mut run,
@@ -336,7 +340,11 @@ fn refresh_with(
     if uid_unused()? {
         terminate_user_sessions(session.uid, &mut run)?;
     }
+    // Complete the queued stop before starting another daemon. Check once
+    // more for helpers that registered a session during the shutdown race.
+    run("/usr/bin/systemctl", &["stop", "plasmalogin.service"])?;
     terminate_user_sessions(greeter_uid, &mut run)?;
+    run("/usr/bin/systemctl", &["daemon-reload"])?;
     run(
         "/usr/bin/systemctl",
         &["reset-failed", "plasmalogin.service"],
@@ -595,13 +603,17 @@ mod tests {
         );
         let stop = calls
             .iter()
-            .position(|call| call == "/usr/bin/systemctl stop plasmalogin.service")
+            .position(|call| call == "/usr/bin/systemctl stop --no-block plasmalogin.service")
             .unwrap();
         let retire = calls
             .iter()
             .position(|call| call.ends_with("TerminateUser u 956"))
             .unwrap();
-        assert!(reload < stop && stop < retire && retire < calls.len() - 1);
+        let stopped = calls
+            .iter()
+            .position(|call| call == "/usr/bin/systemctl stop plasmalogin.service")
+            .unwrap();
+        assert!(write < stop && stop < retire && retire < stopped && stopped < reload);
         assert!(calls.iter().any(|call| call == "/usr/bin/busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager TerminateUser u 1000"));
         assert!(!calls.iter().any(|call| call.contains("terminate-user")));
     }
@@ -622,6 +634,57 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "permission denied");
+    }
+
+    #[test]
+    fn old_greeter_is_retired_before_waiting_for_the_daemon_to_stop() {
+        let mut stopping = false;
+        let mut retired = false;
+        let mut stopped = false;
+        refresh_with(
+            &Session {
+                id: "12".into(),
+                uid: 1000,
+            },
+            956,
+            |command, args| {
+                match (command, args[0]) {
+                    (_, "list-sessions") => {
+                        return Ok(if retired { "" } else { "c6 956 plasmalogin\n" }.into());
+                    }
+                    (_, "show-session") => {
+                        return Ok("User=956\nClass=greeter\nType=wayland\n".into());
+                    }
+                    ("/usr/bin/systemctl", "stop") if args.contains(&"--no-block") => {
+                        stopping = true;
+                    }
+                    ("/usr/bin/busctl", "call") => {
+                        assert!(
+                            stopping,
+                            "Stop creation of old greeters before retiring them"
+                        );
+                        assert_eq!(args.last(), Some(&"956"));
+                        retired = true;
+                    }
+                    ("/usr/bin/systemctl", "stop") => {
+                        assert!(
+                            retired,
+                            "A blocking stop leaves the old password prompt usable"
+                        );
+                        stopped = true;
+                    }
+                    ("/usr/bin/systemctl", "daemon-reload" | "start") => {
+                        assert!(stopped, "Finish retiring the old login manager first");
+                    }
+                    _ => {}
+                }
+                Ok(String::new())
+            },
+            || Ok(()),
+            || Ok(false),
+        )
+        .unwrap();
+        assert!(stopping && retired && stopped);
     }
 
     #[test]

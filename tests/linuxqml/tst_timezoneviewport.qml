@@ -254,6 +254,66 @@ Item {
                 verify(checked >= 2,data.tag+" did not expose two selectable areas at zoom "+subject.mapItem.zoomLevel)
             }
         }
+        function test_first_us_map_click_reveals_selected_list_row_data() {
+            const rows = []
+            for (const rtl of [false, true])
+                for (const size of [
+                    {name:"wide",width:1067,height:710,scale:1},
+                    {name:"compact",width:675,height:520,scale:0.65},
+                    {name:"portrait",width:275,height:800,scale:0.65}
+                ]) rows.push(Object.assign({tag:(rtl?"RTL-":"LTR-")+size.name,rtl},size))
+            return rows
+        }
+        function test_first_us_map_click_reveals_selected_list_row(data) {
+            const codes = [
+                "America/Adak", "America/Anchorage", "America/North_Dakota/Beulah", "America/Boise",
+                "America/North_Dakota/Center", "America/Chicago", "America/Denver", "America/Detroit",
+                "Pacific/Honolulu", "America/Indiana/Indianapolis", "America/Juneau", "America/Indiana/Knox",
+                "America/Los_Angeles", "America/Kentucky/Louisville", "America/Indiana/Marengo",
+                "America/Menominee", "America/Metlakatla", "America/Kentucky/Monticello", "America/New_York",
+                "America/North_Dakota/New_Salem", "America/Nome", "America/Indiana/Petersburg", "America/Phoenix",
+                "America/Sitka", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes",
+                "America/Indiana/Winamac", "America/Yakutat", "Asia/Jerusalem", "Europe/London", "UTC"
+            ]
+            const picker = createTemporaryObject(chinaPickerComponent,host,{
+                width:data.width,height:data.height,uiScale:data.scale,rtl:data.rtl,region:"US",
+                zones:codes.map(code => ({code,label:code.split("/").pop().replace(/_/g," "),
+                    suggested:!code.startsWith("Asia/") && !code.startsWith("Europe/") && code !== "UTC"}))
+            })
+            verify(picker)
+            tryVerify(() => picker.mapItem !== null,5000)
+            const subject = picker.mapItem
+            ready(subject)
+            const view = picker.resultView
+            compare(picker.selectedCode,"")
+            compare(view.currentIndex,-1)
+            verify(view.atYBeginning)
+            verify(hit(subject,40.7142,-74.0064,"America/New_York"))
+            tryCompare(picker,"selectedCode","America/New_York")
+            tryCompare(view,"currentIndex",codes.indexOf("America/New_York"))
+            tryVerify(() => view.currentItem && view.currentItem.selected
+                && view.currentItem.y >= view.contentY-1
+                && view.currentItem.y+view.currentItem.height <= view.contentY+view.height+1,
+                1000,"The first native map click must reveal the selected list row")
+            ready(subject)
+            compare(subject.highlightedZone,picker.selectedCode)
+            verify(picker.canConfirm)
+            view.positionViewAtBeginning()
+            verify(view.atYBeginning)
+            verify(hit(subject,40.7142,-74.0064,"America/New_York"))
+            tryVerify(() => view.currentItem && view.currentItem.selected
+                && view.currentItem.y >= view.contentY-1
+                && view.currentItem.y+view.currentItem.height <= view.contentY+view.height+1,
+                1000,"Clicking an unchanged area must reveal its row after manual scrolling")
+            picker.searchText = "Adak"
+            tryCompare(view,"count",1)
+            verify(hit(subject,40.7142,-74.0064,"America/New_York"))
+            compare(picker.searchText,"")
+            tryCompare(view,"currentIndex",codes.indexOf("America/New_York"))
+            tryVerify(() => view.currentItem && view.currentItem.selected
+                && view.currentItem.y >= view.contentY-1
+                && view.currentItem.y+view.currentItem.height <= view.contentY+view.height+1)
+        }
         function test_china_picker_map_selection_data() {
             return [{tag:"wide",width:1067,height:650},{tag:"compact",width:675,height:650},
                 {tag:"portrait",width:275,height:900}]

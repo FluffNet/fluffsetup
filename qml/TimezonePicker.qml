@@ -137,7 +137,13 @@ Item {
                 onActiveChanged: loadMap()
                 Component.onCompleted: loadMap()
                 onLoaded: {
-                    item.zoneSelected.connect(id => { root.searchText = ""; root.zoneSelected(id) })
+                    item.zoneSelected.connect(id => {
+                        root.searchText = ""
+                        root.zoneSelected(id)
+                        // A repeated map click should also reveal the row
+                        // after the user has scrolled away from it.
+                        results.syncSelection()
+                    })
                 }
             }
             Text {

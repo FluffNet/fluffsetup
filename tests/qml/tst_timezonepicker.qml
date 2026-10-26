@@ -34,6 +34,14 @@ Item {
     }
     SignalSpy { id: selection; target: picker; signalName: "zoneSelected" }
     SignalSpy { id: continuation; target: picker; signalName: "continueRequested" }
+    Component {
+        id: unselectedPicker
+        TimezonePicker {
+            mapEnabled: false
+            selectedCode: ""
+            onZoneSelected: id => selectedCode = id
+        }
+    }
     TestCase {
         name: "TimezonePicker"
         when: windowShown
@@ -47,6 +55,47 @@ Item {
             selection.clear()
             continuation.clear()
             picker.focusSearch()
+        }
+        function test_first_map_selection_reveals_list_row_data() {
+            const rows = []
+            for (const rtl of [false, true]) for (const scale of [1, 0.55])
+                rows.push({tag: (rtl ? "RTL" : "LTR") + "-" + scale, rtl, scale})
+            return rows
+        }
+        function test_first_map_selection_reveals_list_row(data) {
+            const rows = Array.from({length: 40}, (_, index) => ({
+                code: index === 18 ? "America/New_York" : "zone-" + index,
+                label: index === 18 ? "New York (United States)" : "Timezone " + index,
+                english: "Timezone " + index
+            }))
+            const subject = createTemporaryObject(unselectedPicker, surface, {
+                width: 760, height: 650, zones: rows, rtl: data.rtl, uiScale: data.scale
+            })
+            verify(subject)
+            const view = subject.resultView
+            tryCompare(view, "count", rows.length)
+            wait(100)
+            verify(view.atYBeginning)
+            compare(subject.selectedCode, "")
+            subject.zoneSelected("America/New_York")
+            compare(subject.selectedCode, "America/New_York")
+            compare(view.selectedIndex, 18)
+            tryCompare(view, "currentIndex", 18)
+            tryVerify(() => view.currentItem && view.currentItem.selected
+                && view.currentItem.y >= view.contentY - 1
+                && view.currentItem.y + view.currentItem.height <= view.contentY + view.height + 1,
+                1000, "The first map selection must reveal its highlighted list row")
+            // Filtering can temporarily remove the selected row. Restoring
+            // the catalog or replacing its translated model must reveal it.
+            subject.searchText = "no-such-city"
+            tryCompare(view, "currentIndex", -1)
+            subject.searchText = ""
+            tryCompare(view, "currentIndex", 18)
+            subject.zones = rows.slice().reverse()
+            tryCompare(view, "currentIndex", 21)
+            tryVerify(() => view.currentItem && view.currentItem.selected
+                && view.currentItem.y >= view.contentY - 1
+                && view.currentItem.y + view.currentItem.height <= view.contentY + view.height + 1)
         }
         function test_us_initial_view_keeps_all_timezone_choices() {
             const original = picker.zones
