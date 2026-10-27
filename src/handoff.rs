@@ -1,8 +1,8 @@
 //! One-shot, system-managed handoff after successful first-boot finalization.
 //!
-//! Ending KWin does not restart the display-manager daemon. Keep a small root
-//! worker outside the setup session, since cleanup unlinks this executable and
-//! removes the temporary account before the user presses Finish.
+//! Keep a small root worker outside the setup session, since cleanup unlinks
+//! this executable and removes the temporary account before Finish. Only retire
+//! setup sessions; FLLM loads per-user settings without restarting its greeter.
 
 use crate::locale::{atomic_write, checked};
 use std::fs;
@@ -14,9 +14,6 @@ use std::time::{Duration, Instant};
 const UNIT: &str = "fluffsetup-plm-handoff.service";
 const READY: &str = "/run/fluffsetup-plm-handoff/ready";
 const STARTED: &str = "/run/fluffsetup-plm-handoff/started";
-const LOCALE_DROPIN: &str = "/run/systemd/system/plasmalogin.service.d/90-fluffsetup-locale.conf";
-const LOCALE_CONFIGURATION: &str =
-    "[Service]\nEnvironmentFile=/etc/locale.conf\nUnsetEnvironment=LC_ALL\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Session {
@@ -121,7 +118,7 @@ fn after_cleanup(
 ) -> Result<(), String> {
     let result = cleanup().and_then(|()| commit());
     if result.is_err() {
-        // An uncommitted or failed setup must never restart the login manager.
+        // An uncommitted or failed setup must never terminate setup sessions.
         // There is intentionally no ExecStop/ExecStopPost hook on this unit.
         if let Err(error) = run("/usr/bin/systemctl", &["stop", UNIT]) {
             eprintln!("Could not cancel the unfinished PLM handoff: {error}");
@@ -199,14 +196,14 @@ pub fn finalize(
 enum Decision {
     Wait,
     Abort,
-    Refresh,
+    Finish,
 }
 
 fn decision(committed: bool, controller_alive: bool, parent_alive: bool) -> Decision {
     if !committed && !parent_alive {
         Decision::Abort
     } else if committed && !controller_alive {
-        Decision::Refresh
+        Decision::Finish
     } else {
         Decision::Wait
     }
@@ -267,9 +264,8 @@ fn terminate_user_sessions(
         ],
         |current| session_rows(current).any(|(_, owner)| owner == uid),
     )?;
-    // TerminateUser is asynchronous. In particular, an old greeter's user
-    // manager/KWin can retain the VT after the PLM daemon itself has stopped.
-    // Do not launch a competing greeter while these sessions are still closing.
+    // TerminateUser is asynchronous. Wait for the temporary user's sessions
+    // to close without interfering with the display manager's own sessions.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let current = run("/usr/bin/loginctl", &["list-sessions", "--no-legend"])?;
@@ -285,11 +281,9 @@ fn terminate_user_sessions(
     }
 }
 
-fn refresh_with(
+fn finish_with(
     session: &Session,
-    greeter_uid: u32,
     mut run: impl FnMut(&str, &[&str]) -> Result<String, String>,
-    write_locale: impl FnOnce() -> Result<(), String>,
     uid_unused: impl FnOnce() -> Result<bool, String>,
 ) -> Result<(), String> {
     let sessions = run("/usr/bin/loginctl", &["list-sessions", "--no-legend"])?;
@@ -313,20 +307,11 @@ fn refresh_with(
             continue;
         };
         if other_graphical_session(&details, session.uid) {
-            return Err("PLM refresh deferred: another user's graphical session is active.".into());
+            return Err(
+                "Setup handoff deferred: another user's graphical session is active.".into(),
+            );
         }
     }
-    // Explicitly load the finalized system language AND regional categories.
-    // Merely restarting a greeter under the old daemon inherits stale LC_TIME.
-    write_locale()?;
-    // Finish can race PLM starting its old greeter. Queue shutdown first, then
-    // retire the greeter immediately: a blocking stop can wait several seconds
-    // for its helper while the old password prompt is still accepting input.
-    run(
-        "/usr/bin/systemctl",
-        &["stop", "--no-block", "plasmalogin.service"],
-    )?;
-    terminate_user_sessions(greeter_uid, &mut run)?;
     if session_rows(&sessions).any(|(id, uid)| id == session.id && uid == session.uid) {
         session_command(
             &mut run,
@@ -340,47 +325,19 @@ fn refresh_with(
     if uid_unused()? {
         terminate_user_sessions(session.uid, &mut run)?;
     }
-    // Complete the queued stop before starting another daemon. Check once
-    // more for helpers that registered a session during the shutdown race.
-    run("/usr/bin/systemctl", &["stop", "plasmalogin.service"])?;
-    terminate_user_sessions(greeter_uid, &mut run)?;
-    run("/usr/bin/systemctl", &["daemon-reload"])?;
-    run(
-        "/usr/bin/systemctl",
-        &["reset-failed", "plasmalogin.service"],
-    )?;
-    run("/usr/bin/systemctl", &["start", "plasmalogin.service"])?;
     Ok(())
 }
 
-fn refresh(session: &Session) -> Result<(), String> {
-    let passwd = fs::read_to_string("/etc/passwd").map_err(|error| error.to_string())?;
-    let greeter_uid = passwd
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split(':');
-            if fields.next()? != "plasmalogin" {
-                return None;
-            }
-            fields.nth(1)?.parse::<u32>().ok()
-        })
-        .filter(|uid| *uid > 0 && *uid < 1000)
-        .ok_or("Missing PLM system greeter account.")?;
-    refresh_with(
-        session,
-        greeter_uid,
-        checked,
-        || atomic_write(Path::new(LOCALE_DROPIN), LOCALE_CONFIGURATION, 0o644),
-        || {
-            let passwd = fs::read_to_string("/etc/passwd").map_err(|error| error.to_string())?;
-            Ok(!passwd.lines().any(|line| {
-                line.split(':')
-                    .nth(2)
-                    .and_then(|uid| uid.parse::<u32>().ok())
-                    == Some(session.uid)
-            }))
-        },
-    )
+fn finish(session: &Session) -> Result<(), String> {
+    finish_with(session, checked, || {
+        let passwd = fs::read_to_string("/etc/passwd").map_err(|error| error.to_string())?;
+        Ok(!passwd.lines().any(|line| {
+            line.split(':')
+                .nth(2)
+                .and_then(|uid| uid.parse::<u32>().ok())
+                == Some(session.uid)
+        }))
+    })
 }
 
 pub fn run_worker(arguments: &[String]) -> Result<(), String> {
@@ -423,9 +380,9 @@ pub fn run_worker(arguments: &[String]) -> Result<(), String> {
                 eprintln!("PLM handoff cancelled before setup was committed.");
                 return Ok(());
             }
-            Decision::Refresh => {
-                eprintln!("Finish received; refreshing PLM with the finalized system locale.");
-                return refresh(&Session {
+            Decision::Finish => {
+                eprintln!("Finish received; closing temporary setup sessions.");
+                return finish(&Session {
                     id: id.clone(),
                     uid,
                 });
@@ -440,15 +397,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refresh_requires_successful_cleanup_and_finish_even_after_parent_exits() {
+    fn handoff_requires_successful_cleanup_and_finish_even_after_parent_exits() {
         assert_eq!(decision(false, true, true), Decision::Wait);
         assert_eq!(decision(false, false, true), Decision::Wait);
         assert_eq!(decision(false, true, false), Decision::Abort);
         assert_eq!(decision(false, false, false), Decision::Abort);
         assert_eq!(decision(true, true, true), Decision::Wait);
         assert_eq!(decision(true, true, false), Decision::Wait);
-        assert_eq!(decision(true, false, true), Decision::Refresh);
-        assert_eq!(decision(true, false, false), Decision::Refresh);
+        assert_eq!(decision(true, false, true), Decision::Finish);
+        assert_eq!(decision(true, false, false), Decision::Finish);
     }
 
     #[test]
@@ -536,86 +493,80 @@ mod tests {
         ] {
             assert!(!other_graphical_session(details, 1000));
         }
-        assert!(LOCALE_CONFIGURATION.contains("EnvironmentFile=/etc/locale.conf\n"));
-        assert!(LOCALE_CONFIGURATION.contains("UnsetEnvironment=LC_ALL\n"));
-        assert!(!LOCALE_CONFIGURATION.contains("he_"));
     }
 
     #[test]
-    fn disappearing_sessions_do_not_prevent_the_locale_refresh() {
-        use std::cell::RefCell;
-        let calls = RefCell::new(Vec::new());
-        let mut listings = 0;
-        let mut greeter_terminated = false;
-        refresh_with(
+    fn finish_only_retires_setup_sessions_and_preserves_the_greeter() {
+        for reused_uid in [false, true] {
+            let mut setup_present = true;
+            let mut calls = Vec::new();
+            finish_with(
+                &Session {
+                    id: "12".into(),
+                    uid: 1000,
+                },
+                |command, args| {
+                    calls.push(format!("{command} {}", args.join(" ")));
+                    match (command, args[0]) {
+                        ("/usr/bin/loginctl", "list-sessions") => Ok(if setup_present {
+                            "12 1000 fluffsetup\nc3 956 greeter\n"
+                        } else {
+                            "c3 956 greeter\n"
+                        }
+                        .into()),
+                        ("/usr/bin/loginctl", "show-session") => Ok(if args[1] == "12" {
+                            "User=1000\nType=wayland\nClass=user\n"
+                        } else {
+                            "User=956\nType=wayland\nClass=greeter\n"
+                        }
+                        .into()),
+                        ("/usr/bin/loginctl", "terminate-session") => {
+                            assert_eq!(args[1], "12");
+                            setup_present = false;
+                            Ok(String::new())
+                        }
+                        ("/usr/bin/busctl", "call") => {
+                            assert!(!reused_uid);
+                            assert_eq!(args.last(), Some(&"1000"));
+                            Ok(String::new())
+                        }
+                        _ => panic!("Unexpected handoff command: {command} {args:?}"),
+                    }
+                },
+                || Ok(!reused_uid),
+            )
+            .unwrap();
+            assert!(!setup_present);
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.contains("TerminateUser"))
+                    .count(),
+                usize::from(!reused_uid)
+            );
+            assert!(!calls.iter().any(|call| call.contains("systemctl")));
+        }
+    }
+
+    #[test]
+    fn disappearing_setup_session_does_not_prevent_handoff() {
+        finish_with(
             &Session {
                 id: "12".into(),
                 uid: 1000,
             },
-            956,
-            |command, args| {
-                calls
-                    .borrow_mut()
-                    .push(format!("{command} {}", args.join(" ")));
-                match args[0] {
-                    "list-sessions" => {
-                        listings += 1;
-                        Ok(if greeter_terminated {
-                            ""
-                        } else if listings == 1 {
-                            "12 1000 fluffsetup\nc3 956 plasmalogin\n"
-                        } else {
-                            "c3 956 plasmalogin\n"
-                        }
-                        .into())
-                    }
-                    "show-session" if args[1] == "c3" => {
-                        Ok("User=956\nType=wayland\nClass=greeter\n".into())
-                    }
-                    "call" if args.last() == Some(&"956") => {
-                        greeter_terminated = true;
-                        Ok(String::new())
-                    }
-                    "show-session" | "terminate-session" | "call" => Err("No session known".into()),
-                    _ => Ok(String::new()),
+            |command, args| match (command, args[0]) {
+                (_, "list-sessions") => Ok("c3 956 greeter\n".into()),
+                (_, "show-session") => Ok("User=956\nType=wayland\nClass=greeter\n".into()),
+                ("/usr/bin/busctl", "call") => {
+                    assert_eq!(args.last(), Some(&"1000"));
+                    Err("No session known".into())
                 }
-            },
-            || {
-                calls.borrow_mut().push("write finalized locale".into());
-                Ok(())
+                _ => panic!("Unexpected handoff command: {command} {args:?}"),
             },
             || Ok(true),
         )
         .unwrap();
-        let calls = calls.into_inner();
-        let write = calls
-            .iter()
-            .position(|call| call == "write finalized locale")
-            .unwrap();
-        let reload = calls
-            .iter()
-            .position(|call| call == "/usr/bin/systemctl daemon-reload")
-            .unwrap();
-        assert!(write < reload);
-        assert_eq!(
-            calls.last().unwrap(),
-            "/usr/bin/systemctl start plasmalogin.service"
-        );
-        let stop = calls
-            .iter()
-            .position(|call| call == "/usr/bin/systemctl stop --no-block plasmalogin.service")
-            .unwrap();
-        let retire = calls
-            .iter()
-            .position(|call| call.ends_with("TerminateUser u 956"))
-            .unwrap();
-        let stopped = calls
-            .iter()
-            .position(|call| call == "/usr/bin/systemctl stop plasmalogin.service")
-            .unwrap();
-        assert!(write < stop && stop < retire && retire < stopped && stopped < reload);
-        assert!(calls.iter().any(|call| call == "/usr/bin/busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager TerminateUser u 1000"));
-        assert!(!calls.iter().any(|call| call.contains("terminate-user")));
     }
 
     #[test]
@@ -634,121 +585,5 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "permission denied");
-    }
-
-    #[test]
-    fn old_greeter_is_retired_before_waiting_for_the_daemon_to_stop() {
-        let mut stopping = false;
-        let mut retired = false;
-        let mut stopped = false;
-        refresh_with(
-            &Session {
-                id: "12".into(),
-                uid: 1000,
-            },
-            956,
-            |command, args| {
-                match (command, args[0]) {
-                    (_, "list-sessions") => {
-                        return Ok(if retired { "" } else { "c6 956 plasmalogin\n" }.into());
-                    }
-                    (_, "show-session") => {
-                        return Ok("User=956\nClass=greeter\nType=wayland\n".into());
-                    }
-                    ("/usr/bin/systemctl", "stop") if args.contains(&"--no-block") => {
-                        stopping = true;
-                    }
-                    ("/usr/bin/busctl", "call") => {
-                        assert!(
-                            stopping,
-                            "Stop creation of old greeters before retiring them"
-                        );
-                        assert_eq!(args.last(), Some(&"956"));
-                        retired = true;
-                    }
-                    ("/usr/bin/systemctl", "stop") => {
-                        assert!(
-                            retired,
-                            "A blocking stop leaves the old password prompt usable"
-                        );
-                        stopped = true;
-                    }
-                    ("/usr/bin/systemctl", "daemon-reload" | "start") => {
-                        assert!(stopped, "Finish retiring the old login manager first");
-                    }
-                    _ => {}
-                }
-                Ok(String::new())
-            },
-            || Ok(()),
-            || Ok(false),
-        )
-        .unwrap();
-        assert!(stopping && retired && stopped);
-    }
-
-    #[test]
-    fn closing_greeter_must_release_its_session_before_plm_can_start() {
-        let mut closing = 0;
-        let mut started = false;
-        refresh_with(
-            &Session {
-                id: "12".into(),
-                uid: 1000,
-            },
-            956,
-            |command, args| {
-                match (command, args[0]) {
-                    ("/usr/bin/busctl", "call") => {
-                        assert_eq!(args.last(), Some(&"956"));
-                        closing = 2;
-                    }
-                    (_, "list-sessions") if closing > 0 => {
-                        closing -= 1;
-                        return Ok("22 956 plasmalogin\nc6 956 plasmalogin\n".into());
-                    }
-                    (_, "start") => {
-                        assert_eq!(closing, 0);
-                        started = true;
-                    }
-                    _ => {}
-                }
-                Ok(String::new())
-            },
-            || Ok(()),
-            // A reused setup UID must not be terminated.
-            || Ok(false),
-        )
-        .unwrap();
-        assert!(started);
-    }
-
-    #[test]
-    fn failed_greeter_retirement_never_starts_a_competing_greeter() {
-        let result = refresh_with(
-            &Session {
-                id: "12".into(),
-                uid: 1000,
-            },
-            956,
-            |command, args| {
-                if args[0] == "start" {
-                    panic!("old greeter still owns the VT");
-                }
-                if command == "/usr/bin/busctl" {
-                    return Err("permission denied".into());
-                }
-                if args[0] == "list-sessions" {
-                    return Ok("c6 956 plasmalogin\n".into());
-                }
-                if args[0] == "show-session" {
-                    return Ok("User=956\nClass=greeter\nType=wayland\n".into());
-                }
-                Ok(String::new())
-            },
-            || Ok(()),
-            || Ok(false),
-        );
-        assert_eq!(result.unwrap_err(), "permission denied");
     }
 }

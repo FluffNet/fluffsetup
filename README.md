@@ -161,14 +161,9 @@ should execute `/usr/bin/fluffsetup`; FluffSetup then opens.
   Finish then exits the already-running temporary Wayland session
 - arms a one-time system-managed PLM handoff only after finalization succeeds;
   the worker survives account/binary cleanup, waits for Finish, clears remaining
-  temporary sessions and restarts the PLM daemon with the finalized system
-  language and regional formats, without a reboot or additional greeter
-- stops PLM and retires its old greeter sessions before starting the refreshed
-  daemon, waiting for the previous compositor to release its virtual terminal
-  instead of racing a second greeter onto the same screen
-- uses a runtime-only PLM service override to read `/etc/locale.conf`, keeping
-  interface language separate from regional formats and excluding `LC_ALL`;
-  the worker is automatically collected and the override disappears at reboot
+  temporary setup sessions without restarting the display manager or terminating
+  its greeter; FLLM loads the selected user's language and regional settings,
+  and the worker is automatically collected
 - releases the QML windows and wallpaper backing stores before Qt closes its
   display connection, so Finish does not leave native wallpaper cleanup until
   process shutdown
